@@ -338,7 +338,7 @@ def run_visqol(ref_path, deg_path):
 # Main
 # ---------------------------------------------------------------------------
 
-def run_measurement(captured_path, report_path=None, plots_dir=None):
+def run_measurement(captured_path, report_path=None, plots_dir=None, audio_dir=None):
     """Run full measurement pipeline. Returns dict of all results."""
     from report import generate_report, generate_plots as _generate_plots
 
@@ -369,6 +369,12 @@ def run_measurement(captured_path, report_path=None, plots_dir=None):
     skip_samples = int(3.0 * sr_ref)
     ref_content = ref_aligned[skip_samples:]
     deg_content = deg_aligned[skip_samples:]
+
+    # Save aligned audio for A/B playback
+    if audio_dir:
+        os.makedirs(audio_dir, exist_ok=True)
+        sf.write(os.path.join(audio_dir, "reference.wav"), ref_content, sr_ref, subtype="PCM_16")
+        sf.write(os.path.join(audio_dir, "processed.wav"), deg_content, sr_ref, subtype="PCM_16")
 
     spec = spectral_difference(ref_content, deg_content, sr_ref)
     snr = snr_thd_n(ref_content, deg_content, sr_ref)

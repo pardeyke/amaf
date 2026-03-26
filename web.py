@@ -72,7 +72,8 @@ def process_measurement(measurement_id, audio_path, filename):
     try:
         report_path = os.path.join(DATA_DIR, f"{measurement_id}.pdf")
         plots_dir = os.path.join(DATA_DIR, f"{measurement_id}_plots")
-        results = run_measurement(audio_path, report_path, plots_dir=plots_dir)
+        audio_dir = os.path.join(DATA_DIR, f"{measurement_id}_audio")
+        results = run_measurement(audio_path, report_path, plots_dir=plots_dir, audio_dir=audio_dir)
 
         spec = results["spectral"]
         snr = results["snr"]
@@ -173,6 +174,16 @@ def plot(mid, name):
     return send_file(path, mimetype="image/png")
 
 
+@app.route("/audio/<mid>/<name>")
+def audio(mid, name):
+    if name not in ("reference.wav", "processed.wav"):
+        return "Not found", 404
+    path = os.path.join(DATA_DIR, f"{mid}_audio", name)
+    if not os.path.exists(path):
+        return "Not found", 404
+    return send_file(path, mimetype="audio/wav")
+
+
 @app.route("/report/<mid>")
 def report(mid):
     path = os.path.join(DATA_DIR, f"{mid}.pdf")
@@ -206,6 +217,9 @@ def delete(mid):
     plots_dir = os.path.join(DATA_DIR, f"{mid}_plots")
     if os.path.isdir(plots_dir):
         shutil.rmtree(plots_dir, ignore_errors=True)
+    audio_dir = os.path.join(DATA_DIR, f"{mid}_audio")
+    if os.path.isdir(audio_dir):
+        shutil.rmtree(audio_dir, ignore_errors=True)
     return redirect(url_for("index"))
 
 
@@ -804,6 +818,46 @@ PAGE_RESULT = r"""
   .btn:hover { opacity: 0.85; text-decoration: none; }
   .btn-accent2 { background: var(--accent2); }
 
+  /* A/B Player */
+  .ab-player {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1.2rem; margin-bottom: 2rem;
+  }
+  .ab-player h2 { font-size: 0.9rem; color: var(--accent2); margin-bottom: 0.8rem; }
+  .ab-controls { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+  .ab-toggle {
+    display: flex; background: var(--surface2); border-radius: 8px; overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .ab-toggle button {
+    background: none; border: none; color: var(--muted); padding: 0.5rem 1.2rem;
+    font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.15s;
+  }
+  .ab-toggle button.active {
+    background: var(--accent); color: white;
+  }
+  .ab-toggle button:first-child.active { background: var(--accent); }
+  .ab-toggle button:last-child.active { background: var(--accent2); }
+  .ab-play-btn {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    width: 2.4rem; height: 2.4rem; border-radius: 50%; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; font-size: 1rem;
+    transition: border-color 0.15s;
+  }
+  .ab-play-btn:hover { border-color: var(--accent); }
+  .ab-time {
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85rem;
+    color: var(--muted); min-width: 5rem;
+  }
+  .ab-seek {
+    flex: 1; min-width: 120px; -webkit-appearance: none; appearance: none;
+    height: 4px; background: var(--surface2); border-radius: 2px; outline: none;
+    cursor: pointer;
+  }
+  .ab-seek::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent); cursor: pointer;
+  }
   /* Lightbox */
   .lightbox {
     display: none; position: fixed; inset: 0; z-index: 1000;
@@ -897,6 +951,26 @@ PAGE_RESULT = r"""
       <div class="hint">Perceptual similarity. 5 = identical, 1 = bad.</div>
     </div>
     {% endif %}
+  </div>
+
+  <!-- A/B Player -->
+  <div class="ab-player">
+    <h2>A/B Playback</h2>
+    <div class="explain" style="margin-bottom:0.8rem;">
+      Listen to the reference and processed audio side by side. Toggle between A (reference) and B (processed)
+      while playback continues from the same position to hear exactly what the pipeline changed.
+    </div>
+    <audio id="audio-ref" preload="auto" src="/audio/{{ m.id }}/reference.wav"></audio>
+    <audio id="audio-proc" preload="auto" src="/audio/{{ m.id }}/processed.wav"></audio>
+    <div class="ab-controls">
+      <button class="ab-play-btn" id="ab-play" onclick="abTogglePlay()">&#9654;</button>
+      <div class="ab-toggle">
+        <button id="ab-btn-a" class="active" onclick="abSwitch('a')">A &mdash; Reference</button>
+        <button id="ab-btn-b" onclick="abSwitch('b')">B &mdash; Processed</button>
+      </div>
+      <input type="range" class="ab-seek" id="ab-seek" min="0" max="1000" value="0">
+      <span class="ab-time" id="ab-time">0:00 / 0:00</span>
+    </div>
   </div>
 
   <!-- Diagrams -->
@@ -1173,6 +1247,88 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeLightbox();
   if (e.key === 'ArrowLeft') navigate(-1);
   if (e.key === 'ArrowRight') navigate(1);
+});
+
+// A/B Player
+const audioRef = document.getElementById('audio-ref');
+const audioProc = document.getElementById('audio-proc');
+const abPlay = document.getElementById('ab-play');
+const abBtnA = document.getElementById('ab-btn-a');
+const abBtnB = document.getElementById('ab-btn-b');
+const abSeek = document.getElementById('ab-seek');
+const abTime = document.getElementById('ab-time');
+const abPlayer = document.querySelector('.ab-player');
+let abCurrent = 'a'; // 'a' = reference, 'b' = processed
+let abPlaying = false;
+
+// Hide player if audio files aren't available (older measurements)
+audioRef.addEventListener('error', () => { abPlayer.style.display = 'none'; });
+audioProc.addEventListener('error', () => { abPlayer.style.display = 'none'; });
+
+function abActive() { return abCurrent === 'a' ? audioRef : audioProc; }
+function abInactive() { return abCurrent === 'a' ? audioProc : audioRef; }
+
+function fmtTime(s) {
+  if (!isFinite(s)) return '0:00';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return m + ':' + (sec < 10 ? '0' : '') + sec;
+}
+
+function abTogglePlay() {
+  if (abPlaying) {
+    abActive().pause();
+    abPlay.innerHTML = '&#9654;';
+    abPlaying = false;
+  } else {
+    abActive().play();
+    abPlay.innerHTML = '&#9646;&#9646;';
+    abPlaying = true;
+  }
+}
+
+function abSwitch(which) {
+  if (which === abCurrent) return;
+  const pos = abActive().currentTime;
+  const wasPlaying = abPlaying;
+  abActive().pause();
+  abCurrent = which;
+  abActive().currentTime = pos;
+  if (wasPlaying) abActive().play();
+  abBtnA.classList.toggle('active', which === 'a');
+  abBtnB.classList.toggle('active', which === 'b');
+}
+
+// Seek bar
+abSeek.addEventListener('input', () => {
+  const dur = abActive().duration || 0;
+  const t = (abSeek.value / 1000) * dur;
+  audioRef.currentTime = t;
+  audioProc.currentTime = t;
+});
+
+// Update time display and seek bar
+function abUpdate() {
+  const a = abActive();
+  const dur = a.duration || 0;
+  const cur = a.currentTime || 0;
+  abTime.textContent = fmtTime(cur) + ' / ' + fmtTime(dur);
+  if (dur > 0) abSeek.value = Math.round((cur / dur) * 1000);
+  requestAnimationFrame(abUpdate);
+}
+abUpdate();
+
+// When playback ends
+audioRef.addEventListener('ended', () => { abPlaying = false; abPlay.innerHTML = '&#9654;'; });
+audioProc.addEventListener('ended', () => { abPlaying = false; abPlay.innerHTML = '&#9654;'; });
+
+// Keyboard shortcut: space to play/pause, A/B keys to switch
+document.addEventListener('keydown', (e) => {
+  if (lb.classList.contains('active')) return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.code === 'Space') { e.preventDefault(); abTogglePlay(); }
+  if (e.key === 'a' || e.key === 'A') abSwitch('a');
+  if (e.key === 'b' || e.key === 'B') abSwitch('b');
 });
 </script>
 </body>
