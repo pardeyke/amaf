@@ -1188,7 +1188,12 @@ document.addEventListener('keydown', (e) => {
 """
 
 
-if __name__ == "__main__":
+def main():
     init_db()
-    print("AMAF Web GUI — http://localhost:5000")
+    print("AMAF — Audio Multi-Method Assessment Fusion")
+    print("http://localhost:5000")
     app.run(debug=False, host="0.0.0.0", port=5000)
+
+
+if __name__ == "__main__":
+    main()
