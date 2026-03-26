@@ -747,9 +747,20 @@ PAGE_RESULT = r"""
   }
   .card .value { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
   .card .label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; margin-top: 0.2rem; }
+  .card .hint { font-size: 0.7rem; color: var(--muted); margin-top: 0.35rem; line-height: 1.3; }
   .good { color: var(--green); }
   .warn { color: var(--orange); }
   .bad { color: var(--red); }
+
+  /* Explanations */
+  .explain {
+    font-size: 0.8rem; color: var(--muted); line-height: 1.5;
+    padding: 0.5rem 0.8rem; margin-bottom: 0.5rem;
+  }
+  .explain strong { color: var(--text); font-weight: 600; }
+  .scale { display: flex; gap: 0.6rem; margin-top: 0.3rem; flex-wrap: wrap; }
+  .scale span { font-size: 0.75rem; }
+  .scale .g { color: var(--green); } .scale .w { color: var(--orange); } .scale .r { color: var(--red); }
 
   /* Plot sections */
   .plot-section {
@@ -853,37 +864,44 @@ PAGE_RESULT = r"""
         {{ '%.1f'|format(m.snr_db) if m.snr_db is not none else '-' }}
       </div>
       <div class="label">SNR (dB)</div>
+      <div class="hint">Signal vs. added noise. Higher = cleaner.</div>
     </div>
     <div class="card">
       <div class="value">{{ '%.1f'|format(m.null_depth_db) if m.null_depth_db is not none else '-' }}</div>
       <div class="label">Null Depth (dB)</div>
+      <div class="hint">How quiet the difference is. More negative = closer to original.</div>
     </div>
     <div class="card">
       <div class="value {{ 'good' if m.thd_n_pct is not none and m.thd_n_pct < 3 else ('warn' if m.thd_n_pct is not none and m.thd_n_pct < 10 else 'bad') }}">
         {{ '%.2f'|format(m.thd_n_pct) if m.thd_n_pct is not none else '-' }}%
       </div>
       <div class="label">THD+N</div>
+      <div class="hint">Total distortion as % of output. Lower = better.</div>
     </div>
     <div class="card">
       <div class="value {{ 'good' if m.pesq_mos and m.pesq_mos >= 4.0 else ('warn' if m.pesq_mos and m.pesq_mos >= 3.5 else 'bad') }}">
         {{ '%.2f'|format(m.pesq_mos) if m.pesq_mos is not none else '-' }}
       </div>
       <div class="label">PESQ MOS</div>
+      <div class="hint">Perceptual quality score. 4.64 = perfect, &gt;4.0 = very good.</div>
     </div>
     <div class="card">
       <div class="value">{{ '%.2f'|format(m.latency_s) if m.latency_s is not none else '-' }}s</div>
       <div class="label">Latency</div>
+      <div class="hint">Delay from playout to capture point.</div>
     </div>
     {% if m.peaq_odg is not none %}
     <div class="card">
       <div class="value">{{ '%.2f'|format(m.peaq_odg) }}</div>
       <div class="label">PEAQ ODG</div>
+      <div class="hint">Perceptual audio quality. 0 = transparent, &minus;4 = very annoying.</div>
     </div>
     {% endif %}
     {% if m.visqol_mos is not none %}
     <div class="card">
       <div class="value">{{ '%.2f'|format(m.visqol_mos) }}</div>
       <div class="label">ViSQOL MOS</div>
+      <div class="hint">Perceptual similarity. 5 = identical, 1 = bad.</div>
     </div>
     {% endif %}
   </div>
@@ -894,6 +912,11 @@ PAGE_RESULT = r"""
       <h2>Waveform Comparison</h2><span class="toggle">&#9660;</span>
     </div>
     <div class="plot-body">
+      <div class="explain">
+        A 2-second excerpt from the middle of the audio showing original (blue) and processed (red) overlaid.
+        If the pipeline is transparent, the two waveforms sit exactly on top of each other.
+        Visible differences indicate level changes, clipping, or timing shifts.
+      </div>
       <img class="plot-img" data-title="Waveform Comparison"
            src="/plot/{{ m.id }}/waveform.png" loading="lazy">
     </div>
@@ -904,6 +927,13 @@ PAGE_RESULT = r"""
       <h2>Null Test &mdash; Difference Signal Envelope</h2><span class="toggle">&#9660;</span>
     </div>
     <div class="plot-body">
+      <div class="explain">
+        Subtracting the original from the processed audio leaves only what the pipeline changed.
+        In a perfect system this would be silence (&minus;&#8734; dB).
+        The <strong>dashed line</strong> shows the overall average.
+        Louder passages in this plot reveal where the codec introduces the most artifacts &mdash;
+        typically on transients (drums, consonants) and high-frequency content.
+      </div>
       <img class="plot-img" data-title="Null Test"
            src="/plot/{{ m.id }}/null_test.png" loading="lazy">
     </div>
@@ -914,6 +944,13 @@ PAGE_RESULT = r"""
       <h2>Spectral Difference</h2><span class="toggle">&#9660;</span>
     </div>
     <div class="plot-body">
+      <div class="explain">
+        Frequency-by-frequency comparison of the processed audio against the original.
+        The line at <strong>0 dB</strong> means no change.
+        Values above 0 mean the pipeline added energy (boosted); below 0 means it removed energy (attenuated).
+        A sharp drop-off at high frequencies (e.g. above 16 kHz) is the codec&rsquo;s low-pass filter &mdash;
+        this is normal for AAC/Opus and is usually inaudible to most listeners.
+      </div>
       <img class="plot-img" data-title="Spectral Difference"
            src="/plot/{{ m.id }}/spectral_diff.png" loading="lazy">
     </div>
@@ -924,6 +961,12 @@ PAGE_RESULT = r"""
       <h2>Average Magnitude Spectrum</h2><span class="toggle">&#9660;</span>
     </div>
     <div class="plot-body">
+      <div class="explain">
+        The overall frequency &ldquo;fingerprint&rdquo; of both signals.
+        <strong>Blue</strong> = original, <strong>red</strong> = processed.
+        Where the two lines overlap the pipeline has preserved the audio faithfully.
+        Divergence (especially at the high end) shows where the codec discards information to save bandwidth.
+      </div>
       <img class="plot-img" data-title="Average Magnitude Spectrum"
            src="/plot/{{ m.id }}/magnitude_spectrum.png" loading="lazy">
     </div>
@@ -934,6 +977,12 @@ PAGE_RESULT = r"""
       <h2>Spectrograms (Reference vs Processed)</h2><span class="toggle">&#9660;</span>
     </div>
     <div class="plot-body">
+      <div class="explain">
+        A visual &ldquo;heat map&rdquo; of the audio: time runs left to right, frequency runs bottom to top,
+        and brightness shows loudness. Comparing the two side by side reveals differences in spectral detail.
+        Look for missing high-frequency content (dark areas at the top of the processed spectrogram)
+        or smeared transients (blurry vertical lines where the original has sharp ones).
+      </div>
       <img class="plot-img" data-title="Spectrograms"
            src="/plot/{{ m.id }}/spectrograms.png" loading="lazy">
     </div>
@@ -944,6 +993,16 @@ PAGE_RESULT = r"""
       <h2>Segmental SNR (1s windows)</h2><span class="toggle">&#9660;</span>
     </div>
     <div class="plot-body">
+      <div class="explain">
+        Signal-to-noise ratio measured every second across the full duration.
+        <strong>Taller bars = better quality.</strong>
+        <div class="scale">
+          <span class="g">Green (&ge;30 dB): excellent</span>
+          <span class="w">Amber (20&ndash;30 dB): acceptable</span>
+          <span class="r">Red (&lt;20 dB): degraded</span>
+        </div>
+        Dips often correspond to quiet passages, speech sibilants, or sharp transients where lossy codecs struggle most.
+      </div>
       <img class="plot-img" data-title="Segmental SNR"
            src="/plot/{{ m.id }}/segmental_snr.png" loading="lazy">
     </div>
@@ -955,6 +1014,15 @@ PAGE_RESULT = r"""
         <h2>PESQ per Chunk</h2><span class="toggle">&#9660;</span>
       </div>
       <div class="plot-body">
+        <div class="explain">
+          Perceptual quality scored in 30-second chunks on the MOS (Mean Opinion Score) scale, which predicts
+          how a panel of human listeners would rate the quality.
+          <div class="scale">
+            <span class="g">&ge;4.0: very good (most listeners can&rsquo;t tell the difference)</span>
+            <span class="w">3.5&ndash;4.0: noticeable but not annoying</span>
+            <span class="r">&lt;3.5: clearly degraded</span>
+          </div>
+        </div>
         <img class="plot-img" data-title="PESQ per Chunk"
              src="/plot/{{ m.id }}/pesq_chunks.png" loading="lazy">
       </div>
@@ -964,6 +1032,13 @@ PAGE_RESULT = r"""
         <h2>Spectral Difference by Band</h2><span class="toggle">&#9660;</span>
       </div>
       <div class="plot-body">
+        <div class="explain">
+          Average difference split into three ranges:
+          <strong>Low</strong> (bass, 20&ndash;200 Hz),
+          <strong>Mid</strong> (voice/instruments, 200&ndash;4k Hz), and
+          <strong>High</strong> (detail/air, 4k&ndash;20k Hz).
+          Low/mid should be near zero. High is where most codec loss shows up.
+        </div>
         <img class="plot-img" data-title="Spectral Difference by Band"
              src="/plot/{{ m.id }}/band_diff.png" loading="lazy">
       </div>
@@ -975,6 +1050,13 @@ PAGE_RESULT = r"""
       <h2>Difference Signal Spectrogram</h2><span class="toggle">&#9660;</span>
     </div>
     <div class="plot-body">
+      <div class="explain">
+        Spectrogram of <em>only the difference</em> between original and processed &mdash; i.e. everything the pipeline changed.
+        In a perfect system this would be completely black (silent).
+        Bright areas show where and when artifacts were introduced.
+        A persistent bright band at the top indicates the codec&rsquo;s high-frequency cutoff.
+        Scattered bright spots in the mid-range reveal pre-echo or quantisation noise on transients.
+      </div>
       <img class="plot-img" data-title="Difference Signal Spectrogram"
            src="/plot/{{ m.id }}/diff_spectrogram.png" loading="lazy">
     </div>
@@ -984,6 +1066,11 @@ PAGE_RESULT = r"""
   {% if detail %}
   <div class="data-section">
     <h2>Spectral Difference</h2>
+    <div class="explain">
+      How much the frequency content changed. <strong>Mean</strong> is the average deviation across all audible
+      frequencies; <strong>max</strong> is the worst single point (usually at the codec&rsquo;s cutoff frequency).
+      The per-band breakdown shows where the damage is &mdash; low and mid should be near zero for a good codec.
+    </div>
     <div class="grid2">
       <div class="kv"><span class="k">Mean difference</span><span class="v">{{ '%.2f'|format(detail.spectral.mean_spectral_diff_db) }} dB</span></div>
       <div class="kv"><span class="k">Max difference</span><span class="v">{{ '%.2f'|format(detail.spectral.max_spectral_diff_db) }} dB</span></div>
@@ -995,6 +1082,13 @@ PAGE_RESULT = r"""
 
   <div class="data-section">
     <h2>SNR / THD+N</h2>
+    <div class="explain">
+      <strong>SNR</strong> (Signal-to-Noise Ratio): how much louder the wanted signal is compared to everything the
+      pipeline added. Higher is better. <strong>Segmental SNR</strong> breaks this down per second &mdash; the
+      minimum value shows the worst moment.<br>
+      <strong>THD+N</strong> (Total Harmonic Distortion + Noise): the total amount of unwanted signal as a
+      percentage of the output. For lossy codecs, values under 3% are typical of a well-configured pipeline.
+    </div>
     <div class="grid2">
       <div class="kv"><span class="k">Overall SNR</span><span class="v">{{ '%.1f'|format(detail.snr.snr_db) }} dB</span></div>
       <div class="kv"><span class="k">Segmental SNR (mean)</span><span class="v">{{ '%.1f'|format(detail.snr.segmental_snr_db_mean) }} dB</span></div>
@@ -1006,6 +1100,12 @@ PAGE_RESULT = r"""
   {% if detail.pesq %}
   <div class="data-section">
     <h2>PESQ (ITU-T P.862)</h2>
+    <div class="explain">
+      An ITU standard that predicts how human listeners would rate audio quality on a 1&ndash;4.64 scale
+      (MOS &mdash; Mean Opinion Score). The audio is split into 30-second chunks and scored individually.
+      <strong>Mean</strong> is the overall quality; <strong>min</strong> highlights the worst section.
+      Scores above 4.0 are considered very good &mdash; most people cannot hear the difference from the original.
+    </div>
     <div class="grid2">
       <div class="kv"><span class="k">MOS-LQO mean</span><span class="v">{{ '%.3f'|format(detail.pesq.mos_lqo_mean) }}</span></div>
       <div class="kv"><span class="k">MOS-LQO min</span><span class="v">{{ '%.3f'|format(detail.pesq.mos_lqo_min) }}</span></div>
@@ -1017,8 +1117,15 @@ PAGE_RESULT = r"""
 
   <div class="data-section">
     <h2>Alignment</h2>
+    <div class="explain">
+      Before comparing, the two audio files must be lined up sample-by-sample. AMAF uses a sync chirp
+      (a rising tone at the start of the reference) to find the exact offset.
+      <strong>Offset</strong> is how far into the captured file the reference audio starts &mdash;
+      this equals the pipeline latency. <strong>Confidence</strong> is how clear the match was;
+      values above 100x are reliable.
+    </div>
     <div class="grid2">
-      <div class="kv"><span class="k">Offset</span><span class="v">{{ detail.alignment.offset_samples }} samples</span></div>
+      <div class="kv"><span class="k">Offset</span><span class="v">{{ detail.alignment.offset_samples }} samples ({{ '%.2f'|format(m.latency_s) }}s)</span></div>
       <div class="kv"><span class="k">Confidence</span><span class="v">{{ '%.0f'|format(detail.alignment.confidence) }}x</span></div>
     </div>
   </div>
