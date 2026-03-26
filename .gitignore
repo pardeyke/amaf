@@ -1,0 +1,28 @@
+# Audio files (large, generated)
+*.wav
+*.asd
+*.m4a
+*.mp3
+
+# Test audio source material
+SQAM_FLAC_00s9l4/
+
+# Runtime data
+data/
+degraded_aligned.wav
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.claude/
+.vscode/
+.idea/
