@@ -26,13 +26,13 @@ Open http://localhost:5000 — that's it. Everything happens in the web UI.
 
 Go to **Build Reference** in the web UI. Browse all 70 EBU SQAM tracks organised by category (strings, brass, percussion, speech, classical, pop), click to select in the order you want, and hit **Build**. A sync chirp is automatically prepended for alignment.
 
-A pre-built `reference.wav` is included and ready to use out of the box — it covers pop, speech, classical, and transient material (~6 min).
+A pre-built `reference.wav` is included and ready to use out of the box — it covers pop music, speech, classical, and transient material (~6 min).
 
 > The SQAM source files are bundled in the repo under `SQAM_FLAC_00s9l4/`. No separate download needed.
 
 ### 2. Play through your pipeline
 
-Play `reference.wav` from your playout system through the full signal chain. Download the reference file from the web UI or use it directly from the repo.
+Play `reference.wav` from your system through the full signal chain. Download the reference file from the web UI or use it directly from the repo.
 
 ### 3. Upload the capture
 
@@ -82,7 +82,7 @@ Outputs metrics to stdout and generates a PDF report.
 
 The reference file starts with a 2-second linear sweep from 20 Hz to 20 kHz at -3 dBFS. This signal:
 
-- Survives multiple lossy AAC/Opus re-encodings
+- Survives multiple lossy re-encodings
 - Produces a sharp, unambiguous peak when cross-correlated with the captured audio
 - Enables sample-accurate alignment even through 20+ seconds of pipeline latency
 - Is robust to level changes and mild EQ applied by the pipeline
