@@ -1,12 +1,3 @@
-# Audio files (large, generated)
-*.wav
-*.asd
-*.m4a
-*.mp3
-
-# Test audio source material
-SQAM_FLAC_00s9l4/
-
 # Runtime data
 data/
 degraded_aligned.wav
@@ -23,6 +14,5 @@ build/
 Thumbs.db
 
 # IDE / editor
-.claude/
 .vscode/
 .idea/

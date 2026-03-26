@@ -33,7 +33,7 @@ brew install ffmpeg  # macOS
 
 ### 1. Get test audio
 
-Download the [EBU SQAM](https://tech.ebu.ch/publications/sqamcd) FLAC files and place them in `SQAM_FLAC_00s9l4/`:
+Download the [EBU SQAM](https://qc.ebu.io/testmaterial/523/) FLAC files and place them in `SQAM_FLAC_00s9l4/`:
 
 ```
 SQAM_FLAC_00s9l4/

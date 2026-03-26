@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(soxi /Users/aloysius/Projects/amaf/SQAM_FLAC_00s9l4/01.flac)",
+      "Bash(ffprobe -hide_banner /Users/aloysius/Projects/amaf/SQAM_FLAC_00s9l4/01.flac)",
+      "Bash(for f:*)",
+      "Bash(do ffprobe:*)",
+      "Bash(done)",
+      "Bash(python:*)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(gst-inspect-1.0 peaq:*)",
+      "Bash(pip show:*)",
+      "Bash(python3 -c \"import pesq\")",
+      "Bash(python3 -c \"import numpy; import scipy; import soundfile\")",
+      "Bash(brew list:*)",
+      "Bash(pip list:*)",
+      "Bash(python3:*)",
+      "Bash(pip install:*)",
+      "Bash(brew search:*)",
+      "Bash(pip3 search:*)",
+      "Bash(pip3 index:*)",
+      "Bash(conda search:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(git branch:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}
