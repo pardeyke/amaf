@@ -10,60 +10,58 @@ Playout → Mixer → SDI Embedder → Encoder → CDN → YouTube → Capture
 
 ## What it does
 
-1. **Generate a reference file** — concatenates EBU SQAM test material with a sync chirp for alignment
-2. **Align automatically** — cross-correlates the chirp to find sample-accurate offset, even after 20+ seconds of pipeline latency
-3. **Measure with multiple methods:**
+1. **Build a reference file** — pick tracks from the EBU SQAM library via the web UI or CLI; a sync chirp is prepended automatically
+2. **Play it through your pipeline** — the included `reference.wav` is ready to use out of the box
+3. **Capture the output** — download from YouTube, loopback record, or grab the file from your CDN
+4. **Measure** — upload the capture and get results in seconds:
    - **Spectral difference / null test** — per-band (low/mid/high) magnitude comparison
    - **SNR / THD+N** — overall and segmental (1s windows)
    - **PESQ** (ITU-T P.862) — perceptual speech quality, wideband MOS-LQO
    - **PEAQ** (ITU-R BS.1387) — perceptual audio quality (requires [gstpeaq](https://github.com/HSU-ANT/gstpeaq))
    - **ViSQOL** — perceptual similarity (requires [visqol](https://github.com/google/visqol))
-4. **Report** — generates a PDF with spectrograms, spectral plots, and a metrics summary
-5. **Web GUI** — upload captures, browse results, view interactive zoomable diagrams
+5. **Report** — PDF with spectrograms and metrics, or interactive web diagrams with zoom
 
 ## Quick start
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
 
-# Also need ffmpeg for non-WAV input formats
+# ffmpeg is needed for non-WAV input formats (M4A, MP3, etc.)
 brew install ffmpeg  # macOS
 ```
 
 ### 1. Get test audio
 
-Download the [EBU SQAM](https://qc.ebu.io/testmaterial/523/) FLAC files and place them in `SQAM_FLAC_00s9l4/`:
+Download the [EBU SQAM](https://qc.ebu.io/testmaterial/523/) FLAC files and place them in `SQAM_FLAC_00s9l4/`. This is only needed if you want to build a custom reference track — a default `reference.wav` is included in the repo.
 
-```
-SQAM_FLAC_00s9l4/
-├── 01.flac
-├── 02.flac
-├── ...
-└── 70.flac
+### 2. Build a reference (optional)
+
+A pre-built `reference.wav` (24-bit, 44.1 kHz stereo, ~6 min) is included and ready to use. It contains a sync chirp followed by a selection of SQAM tracks covering pop, speech, classical, and transient material.
+
+To build a custom reference with different tracks:
+
+**Web UI** (recommended):
+
+```bash
+python web.py
+# Open http://localhost:5000 → click "Build Reference"
 ```
 
-### 2. Generate the reference file
+Browse all 70 SQAM tracks organised by category (strings, brass, percussion, speech, etc.), click to select in order, see the running duration, and generate with one click.
+
+**CLI:**
 
 ```bash
 python generate_reference.py
 ```
 
-This creates `reference.wav` — a 24-bit 44.1kHz stereo WAV containing a sync chirp followed by selected SQAM tracks with silence gaps. Play this file through your pipeline.
+Uses a default track selection. Edit `DEFAULT_TRACKS` in the script to customise.
 
-### 3. Capture the output
+### 3. Play and capture
 
-Record or download the audio from the end of your pipeline (e.g., YouTube stream download, loopback recording). Any format ffmpeg can decode is supported.
+Play `reference.wav` through your pipeline. Record or download the audio from the output (YouTube stream download, loopback recording, file from CDN). Any format ffmpeg can decode is supported.
 
 ### 4. Measure
-
-**Command line:**
-
-```bash
-python measure.py captured_audio.wav
-```
-
-Accepts WAV, M4A, MP3, FLAC, or any format ffmpeg supports. Outputs metrics to stdout and generates a PDF report.
 
 **Web GUI:**
 
@@ -72,16 +70,22 @@ python web.py
 # Open http://localhost:5000
 ```
 
-Upload captured audio files through the browser. Results are stored in a SQLite database and include interactive zoomable diagrams.
+Upload the captured audio, add an optional label (e.g. "YouTube 1080p AAC"), and results appear automatically with interactive zoomable diagrams.
 
-## Output
+**Command line:**
 
-### Metrics
+```bash
+python measure.py captured_audio.wav
+```
+
+Outputs metrics to stdout and generates a PDF report.
+
+## Metrics
 
 | Metric | What it tells you |
 |--------|-------------------|
 | **SNR** | Overall signal-to-noise ratio of the degradation |
-| **Segmental SNR** | Per-second SNR — reveals where the codec struggles |
+| **Segmental SNR** | Per-second SNR — reveals where the codec struggles most |
 | **Null depth** | RMS level of the difference signal relative to the original |
 | **THD+N** | Total error power as a percentage of the output |
 | **Spectral difference** | Per-band frequency response deviation (low/mid/high) |
@@ -89,19 +93,15 @@ Upload captured audio files through the browser. Results are stored in a SQLite 
 | **PEAQ ODG** | Objective Difference Grade (-4 to 0, 0 = transparent) |
 | **ViSQOL MOS** | Perceptual similarity score |
 
-### PDF report
+## Web dashboard
 
-Three-page report with spectrograms, spectral difference plots, segmental SNR over time, PESQ per chunk, and a full metrics table. Ready to hand to management.
-
-### Web dashboard
-
-Dark-themed dashboard with:
-- Upload and auto-analysis
-- Color-coded metrics overview (green/amber/red)
-- Full-screen zoomable diagrams with keyboard navigation
-- Collapsible plot sections
-- PDF download per measurement
-- Persistent results in SQLite
+- **Reference builder** — browse and select SQAM tracks by category, see duration, build with one click
+- **Upload and auto-analysis** with background processing
+- **Color-coded metrics** (green/amber/red) at a glance
+- **Full-screen zoomable diagrams** with keyboard navigation (arrow keys, Escape)
+- **Collapsible plot sections** — waveform, null test, spectral difference, spectrograms, segmental SNR, PESQ per chunk, magnitude spectrum
+- **PDF report download** per measurement
+- **Persistent results** in SQLite
 
 ## How the sync chirp works
 
@@ -116,12 +116,13 @@ The reference file starts with a 2-second linear sweep from 20 Hz to 20 kHz at -
 
 ```
 amaf/
-├── generate_reference.py   # Build the reference WAV from SQAM source material
-├── measure.py              # CLI measurement pipeline + library API
-├── report.py               # PDF report and web plot generation
-├── web.py                  # Flask web GUI
+├── reference.wav             # Pre-built reference file, ready to use
+├── generate_reference.py     # Reference builder (CLI + library for web UI)
+├── measure.py                # Measurement pipeline (CLI + library)
+├── report.py                 # PDF report and web plot generation
+├── web.py                    # Flask web GUI with reference builder + results dashboard
 ├── requirements.txt
-└── SQAM_FLAC_00s9l4/       # EBU SQAM source files (not included, download separately)
+└── SQAM_FLAC_00s9l4/         # EBU SQAM source files (download separately for custom references)
 ```
 
 ## Optional: PEAQ and ViSQOL

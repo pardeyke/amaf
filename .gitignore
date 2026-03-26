@@ -1,6 +1,10 @@
 # Runtime data
 data/
 degraded_aligned.wav
+*.asd
+
+# Audio formats (reference.wav is tracked via git-lfs)
+SQAM_FLAC_00s9l4/
 
 # Python
 __pycache__/

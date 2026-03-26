@@ -18,6 +18,7 @@ from flask import (
 
 from measure import run_measurement
 from report import generate_plots
+from generate_reference import get_sqam_tracks, build_reference
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -209,6 +210,51 @@ def delete(mid):
 
 
 # ---------------------------------------------------------------------------
+# Reference builder routes
+# ---------------------------------------------------------------------------
+
+@app.route("/reference")
+def reference_builder():
+    tracks = get_sqam_tracks()
+    ref_path = os.path.join(BASE_DIR, "reference.wav")
+    ref_exists = os.path.exists(ref_path)
+    ref_size = os.path.getsize(ref_path) if ref_exists else 0
+    return render_template_string(
+        PAGE_REFERENCE, tracks=tracks,
+        ref_exists=ref_exists, ref_size=ref_size,
+    )
+
+
+@app.route("/reference/build", methods=["POST"])
+def reference_build():
+    data = request.get_json()
+    track_nums = data.get("tracks", [])
+    if not track_nums:
+        return jsonify({"error": "No tracks selected"}), 400
+    try:
+        track_nums = [int(t) for t in track_nums]
+        path, duration = build_reference(track_nums)
+        size = os.path.getsize(path)
+        return jsonify({
+            "ok": True,
+            "duration": round(duration, 1),
+            "size": size,
+            "tracks": len(track_nums),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/reference/download")
+def reference_download():
+    path = os.path.join(BASE_DIR, "reference.wav")
+    if not os.path.exists(path):
+        return "No reference file yet", 404
+    return send_file(path, mimetype="audio/wav", as_attachment=True,
+                     download_name="reference.wav")
+
+
+# ---------------------------------------------------------------------------
 # Templates
 # ---------------------------------------------------------------------------
 
@@ -305,19 +351,29 @@ PAGE_INDEX = r"""
   <h1><span>AMAF</span></h1>
   <p class="subtitle">Audio Multi-Method Assessment Fusion</p>
 
-  <div class="upload-card">
-    <h2>New Measurement</h2>
-    <form class="upload-form" method="post" action="/upload" enctype="multipart/form-data">
-      <div class="field">
-        <label>Audio file</label>
-        <input type="file" name="audio" accept="audio/*,.wav,.flac,.m4a,.mp3,.ogg,.opus,.aac" required>
-      </div>
-      <div class="field">
-        <label>Label (optional)</label>
-        <input type="text" name="label" placeholder="e.g. YouTube 1080p AAC">
-      </div>
-      <button class="btn" type="submit">Analyse</button>
-    </form>
+  <div class="upload-card" style="display:flex; gap:1.5rem; flex-wrap:wrap; align-items:start;">
+    <div style="flex:1; min-width:300px;">
+      <h2>New Measurement</h2>
+      <form class="upload-form" method="post" action="/upload" enctype="multipart/form-data">
+        <div class="field">
+          <label>Audio file</label>
+          <input type="file" name="audio" accept="audio/*,.wav,.flac,.m4a,.mp3,.ogg,.opus,.aac" required>
+        </div>
+        <div class="field">
+          <label>Label (optional)</label>
+          <input type="text" name="label" placeholder="e.g. YouTube 1080p AAC">
+        </div>
+        <button class="btn" type="submit">Analyse</button>
+      </form>
+    </div>
+    <div style="border-left:1px solid var(--border); padding-left:1.5rem; min-width:200px;">
+      <h2 style="color:var(--accent);">Reference Track</h2>
+      <p style="font-size:0.85rem; color:var(--muted); margin-bottom:0.75rem;">
+        Build or download the reference WAV to play through your pipeline.
+      </p>
+      <a href="/reference" class="btn" style="background:var(--accent);">Build Reference</a>
+      <a href="/reference/download" class="btn" style="background:var(--accent2); margin-top:0.5rem;">Download Current</a>
+    </div>
   </div>
 
   <div class="results">
@@ -404,6 +460,253 @@ PAGE_INDEX = r"""
     poll();
   }, 3000);
 })();
+</script>
+</body>
+</html>
+"""
+
+
+PAGE_REFERENCE = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMAF — Build Reference</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #242836;
+    --border: #2e3345; --text: #e4e6f0; --muted: #8b8fa3;
+    --accent: #6c8aff; --accent2: #4ecdc4; --green: #4caf50;
+    --orange: #ff9800; --red: #f44336;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.5;
+  }
+  .container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .back { font-size: 0.85rem; margin-bottom: 1.5rem; display: inline-block; }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  h1 span { color: var(--accent); }
+  .subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; }
+
+  /* Sticky bar */
+  .sticky-bar {
+    position: sticky; top: 0; z-index: 100;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1rem 1.5rem; margin-bottom: 1.5rem;
+    display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap;
+    backdrop-filter: blur(12px);
+  }
+  .sticky-bar .stat { text-align: center; }
+  .sticky-bar .stat .num {
+    font-size: 1.4rem; font-weight: 700; color: var(--accent2);
+    font-variant-numeric: tabular-nums;
+  }
+  .sticky-bar .stat .lbl { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
+  .btn {
+    display: inline-block; background: var(--accent); color: white; border: none;
+    border-radius: 8px; padding: 0.55rem 1.4rem; font-size: 0.9rem; cursor: pointer;
+    text-decoration: none; font-weight: 600; transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; text-decoration: none; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-accent2 { background: var(--accent2); }
+  .btn-sm { padding: 0.35rem 0.8rem; font-size: 0.8rem; }
+  .btn-outline {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+  }
+  .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+
+  .spacer { flex: 1; }
+  .status-msg {
+    font-size: 0.85rem; padding: 0.4rem 0.8rem; border-radius: 6px;
+    display: none;
+  }
+  .status-msg.success { display: inline-block; background: rgba(76,175,80,0.15); color: var(--green); }
+  .status-msg.error { display: inline-block; background: rgba(244,67,54,0.15); color: var(--red); }
+  .status-msg.building { display: inline-block; background: rgba(108,138,255,0.15); color: var(--accent); }
+
+  /* Category headers */
+  .category {
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--accent2); margin: 1.5rem 0 0.5rem; padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .category:first-of-type { margin-top: 0; }
+
+  /* Track grid */
+  .tracks { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.5rem; }
+  .track {
+    display: flex; align-items: center; gap: 0.75rem;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.6rem 0.8rem; cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    user-select: none;
+  }
+  .track:hover { border-color: var(--accent); }
+  .track.selected { border-color: var(--accent2); background: rgba(78,205,196,0.08); }
+  .track .num {
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8rem;
+    color: var(--muted); min-width: 1.8rem;
+  }
+  .track .title { font-size: 0.85rem; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .track .dur {
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8rem;
+    color: var(--muted); white-space: nowrap;
+  }
+  .track .order-badge {
+    background: var(--accent2); color: var(--bg); font-size: 0.7rem;
+    font-weight: 700; width: 1.4rem; height: 1.4rem; border-radius: 50%;
+    display: none; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .track.selected .order-badge { display: flex; }
+</style>
+</head>
+<body>
+<div class="container">
+  <a class="back" href="/">&larr; Dashboard</a>
+  <h1><span>Reference Track Builder</span></h1>
+  <p class="subtitle">
+    Select tracks from the EBU SQAM library to build your reference file.
+    A 2s sync chirp is automatically prepended for alignment.
+    Click tracks in the order you want them.
+  </p>
+
+  <div class="sticky-bar">
+    <div class="stat">
+      <div class="num" id="sel-count">0</div>
+      <div class="lbl">Tracks</div>
+    </div>
+    <div class="stat">
+      <div class="num" id="sel-duration">0:03</div>
+      <div class="lbl">Duration</div>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn btn-outline btn-sm" onclick="selectAll()">Select All</button>
+    <button class="btn btn-outline btn-sm" onclick="clearAll()">Clear</button>
+    <button class="btn btn-accent2" id="build-btn" onclick="buildReference()" disabled>
+      Build Reference
+    </button>
+    <span class="status-msg" id="status"></span>
+  </div>
+
+  {% set categories = [
+    ("Test Signals", [1,2,3,4,5,6,7]),
+    ("Strings", [8,9,10,11]),
+    ("Woodwinds", [12,13,14,15,16,17,18,19,20]),
+    ("Brass", [21,22,23,24]),
+    ("Plucked / Keys", [25,39,40,41,42,43,58]),
+    ("Percussion", [26,27,28,29,30,31,32,33,34,35,36,37,38]),
+    ("Vocals", [44,45,46,47,48]),
+    ("Speech", [49,50,51,52,53,54]),
+    ("Classical", [55,56,57,59,60,61,62,63,64,65,66,67,68]),
+    ("Pop", [69,70]),
+  ] %}
+
+  {% for cat_name, cat_nums in categories %}
+  <div class="category">{{ cat_name }}</div>
+  <div class="tracks">
+    {% for t in tracks if t.num in cat_nums %}
+    <div class="track" data-num="{{ t.num }}" data-dur="{{ t.duration }}"
+         onclick="toggleTrack(this)">
+      <span class="order-badge"></span>
+      <span class="num">{{ '%02d'|format(t.num) }}</span>
+      <span class="title" title="{{ t.title }}">{{ t.title }}</span>
+      <span class="dur">{{ '%d:%02d'|format(t.duration // 60, t.duration % 60) }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+
+<script>
+const CHIRP_DUR = 3; // 2s chirp + 1s silence
+let selected = [];
+
+function updateUI() {
+  const totalDur = selected.reduce((sum, el) => sum + parseFloat(el.dataset.dur), 0)
+    + selected.length  // 1s silence per track
+    + CHIRP_DUR;
+  const mins = Math.floor(totalDur / 60);
+  const secs = Math.floor(totalDur % 60);
+  document.getElementById('sel-count').textContent = selected.length;
+  document.getElementById('sel-duration').textContent = mins + ':' + String(secs).padStart(2, '0');
+  document.getElementById('build-btn').disabled = selected.length === 0;
+
+  // Update order badges
+  document.querySelectorAll('.track').forEach(t => {
+    const idx = selected.indexOf(t);
+    const badge = t.querySelector('.order-badge');
+    if (idx >= 0) {
+      badge.textContent = idx + 1;
+      t.classList.add('selected');
+    } else {
+      t.classList.remove('selected');
+    }
+  });
+}
+
+function toggleTrack(el) {
+  const idx = selected.indexOf(el);
+  if (idx >= 0) {
+    selected.splice(idx, 1);
+  } else {
+    selected.push(el);
+  }
+  updateUI();
+}
+
+function selectAll() {
+  selected = Array.from(document.querySelectorAll('.track'));
+  updateUI();
+}
+
+function clearAll() {
+  selected = [];
+  updateUI();
+}
+
+function buildReference() {
+  const btn = document.getElementById('build-btn');
+  const status = document.getElementById('status');
+  const nums = selected.map(el => parseInt(el.dataset.num));
+
+  btn.disabled = true;
+  btn.textContent = 'Building...';
+  status.className = 'status-msg building';
+  status.textContent = 'Generating reference file...';
+
+  fetch('/reference/build', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tracks: nums}),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      const mb = (data.size / 1048576).toFixed(1);
+      status.className = 'status-msg success';
+      status.textContent = 'reference.wav built (' + data.duration + 's, ' + mb + ' MB)';
+    } else {
+      status.className = 'status-msg error';
+      status.textContent = 'Error: ' + data.error;
+    }
+  })
+  .catch(e => {
+    status.className = 'status-msg error';
+    status.textContent = 'Error: ' + e.message;
+  })
+  .finally(() => {
+    btn.disabled = false;
+    btn.textContent = 'Build Reference';
+  });
+}
+
+updateUI();
 </script>
 </body>
 </html>
