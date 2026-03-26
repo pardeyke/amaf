@@ -1,12 +1,6 @@
 # AMAF — Audio Multi-Method Assessment Fusion
 
-Measure audio quality loss across livestreaming pipelines by comparing a known reference signal against the captured output. AMAF combines multiple measurement methods into a single automated workflow: chirp-based sample-accurate alignment, spectral analysis, perceptual quality scoring, and PDF/web reporting.
-
-Built for broadcast engineers who need to quantify degradation across chains like:
-
-```
-Playout → Mixer → SDI Embedder → Encoder → CDN → YouTube → Capture
-```
+Measure audio quality loss across audio pipelines by comparing a known reference signal against the captured output. AMAF combines multiple measurement methods into a single automated workflow: chirp-based sample-accurate alignment, spectral analysis, perceptual quality scoring, and PDF/web reporting. Built for broadcast engineers who need to quantify degradation across.
 
 ## Quick start
 

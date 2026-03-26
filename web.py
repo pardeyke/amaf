@@ -390,7 +390,6 @@ PAGE_INDEX = r"""
           <th>Null</th>
           <th>THD+N</th>
           <th>PESQ</th>
-          <th>Latency</th>
           <th></th>
         </tr>
       </thead>
@@ -414,7 +413,6 @@ PAGE_INDEX = r"""
           <td class="mono {{ 'good' if m.pesq_mos and m.pesq_mos >= 4.0 else ('warn' if m.pesq_mos and m.pesq_mos >= 3.5 else 'bad') }}">
             {{ '%.2f'|format(m.pesq_mos) if m.pesq_mos is not none else '-' }}
           </td>
-          <td class="mono">{{ '%.2f'|format(m.latency_s) if m.latency_s is not none else '-' }}s</td>
           <td>
             <div class="actions">
               <a href="/result/{{ m.id }}" class="btn btn-sm">Details</a>
@@ -885,11 +883,6 @@ PAGE_RESULT = r"""
       <div class="label">PESQ MOS</div>
       <div class="hint">Perceptual quality score. 4.64 = perfect, &gt;4.0 = very good.</div>
     </div>
-    <div class="card">
-      <div class="value">{{ '%.2f'|format(m.latency_s) if m.latency_s is not none else '-' }}s</div>
-      <div class="label">Latency</div>
-      <div class="hint">Delay from playout to capture point.</div>
-    </div>
     {% if m.peaq_odg is not none %}
     <div class="card">
       <div class="value">{{ '%.2f'|format(m.peaq_odg) }}</div>
@@ -1120,12 +1113,11 @@ PAGE_RESULT = r"""
     <div class="explain">
       Before comparing, the two audio files must be lined up sample-by-sample. AMAF uses a sync chirp
       (a rising tone at the start of the reference) to find the exact offset.
-      <strong>Offset</strong> is how far into the captured file the reference audio starts &mdash;
-      this equals the pipeline latency. <strong>Confidence</strong> is how clear the match was;
-      values above 100x are reliable.
+      <strong>Offset</strong> is how many samples into the captured file the reference audio starts.
+      <strong>Confidence</strong> is how clear the match was; values above 100x are reliable.
     </div>
     <div class="grid2">
-      <div class="kv"><span class="k">Offset</span><span class="v">{{ detail.alignment.offset_samples }} samples ({{ '%.2f'|format(m.latency_s) }}s)</span></div>
+      <div class="kv"><span class="k">Offset</span><span class="v">{{ detail.alignment.offset_samples }} samples</span></div>
       <div class="kv"><span class="k">Confidence</span><span class="v">{{ '%.0f'|format(detail.alignment.confidence) }}x</span></div>
     </div>
   </div>

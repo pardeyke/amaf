@@ -96,12 +96,6 @@ def generate_report(
         ax_summary.text(0, 3.2, "Source:", fontsize=8, color=COLORS["muted"])
         ax_summary.text(1.5, 3.2, os.path.basename(captured_path),
                         fontsize=8, fontweight="bold")
-        ax_summary.text(5, 3.2, "Pipeline latency:", fontsize=8,
-                        color=COLORS["muted"])
-        ax_summary.text(7, 3.2,
-                        f"{alignment_info['offset_samples']/sr:.2f}s "
-                        f"({alignment_info['offset_samples']} samples)",
-                        fontsize=8, fontweight="bold")
         ax_summary.text(0, 2.7, "Duration:", fontsize=8, color=COLORS["muted"])
         ax_summary.text(1.5, 2.7, f"{len(ref_m)/sr:.1f}s analysed", fontsize=8)
         ax_summary.text(5, 2.7, "Alignment confidence:", fontsize=8,
@@ -374,7 +368,6 @@ def generate_report(
         ax_table.axis("off")
 
         rows = [
-            ["Pipeline Latency", f"{alignment_info['offset_samples']/sr:.2f}s"],
             ["Alignment Confidence", f"{alignment_info['confidence']:.0f}x"],
             ["Analysed Duration", f"{len(ref_m)/sr:.1f}s"],
             ["", ""],

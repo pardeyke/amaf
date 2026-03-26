@@ -26,7 +26,9 @@
       "Bash(git init:*)",
       "Bash(git add:*)",
       "Bash(git branch:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(amaf --help)",
+      "Bash(timeout 2 amaf)"
     ]
   }
 }
