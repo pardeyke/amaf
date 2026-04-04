@@ -1,16 +1,13 @@
 """
-AMAF — Audio Multi-Method Assessment Fusion
+AMAF — Audio/Video Multi-Method Assessment Fusion
 
 Usage:
-    python measure.py <captured.wav>
+    python measure.py <captured.wav|mp4>
 
-Aligns the captured (degraded) audio to reference.wav using the sync chirp,
-then runs all available quality metrics:
-  - Spectral difference / null test
-  - SNR, THD+N
-  - PESQ (ITU-T P.862)
-  - PEAQ (ITU-R BS.1387) — requires gstpeaq
-  - ViSQOL — requires visqol binary
+Aligns the captured (degraded) media to the reference using sync chirp
+(audio) and luminance chirp (video), then runs all available quality metrics:
+  Audio: Spectral difference / null test, SNR, THD+N, PESQ, POLQA, PEAQ, ViSQOL
+  Video: VMAF, PSNR, SSIM (via ffmpeg)
 """
 
 import sys
@@ -30,6 +27,7 @@ CHIRP_F1 = 20000.0
 CHIRP_AMPLITUDE = 10 ** (-3.0 / 20)
 
 REFERENCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference.wav")
+REFERENCE_VIDEO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference_video.mp4")
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +93,64 @@ def align(ref, deg, sr):
         "confidence": confidence,
     }
     return ref[:min_len], deg_aligned[:min_len], info
+
+
+def align_signals(ref, deg, sr):
+    """Align two arbitrary signals via cross-correlation (no sync chirp needed)."""
+    ref_mono = ref.mean(axis=1) if ref.ndim > 1 else ref
+    deg_mono = deg.mean(axis=1) if deg.ndim > 1 else deg
+
+    # Use first 60s of reference as correlation template
+    template_len = min(len(ref_mono), sr * 60)
+    template = ref_mono[:template_len]
+
+    search_len = min(len(deg_mono), sr * 60 + template_len)
+    deg_search = deg_mono[:search_len]
+
+    corr = sig.fftconvolve(deg_search, template[::-1], mode="full")
+    peak_idx = np.argmax(np.abs(corr))
+    offset = peak_idx - template_len + 1
+
+    print(f"Alignment: reference found at sample {offset} in processed "
+          f"({offset / sr:.3f}s)")
+
+    peak_val = np.abs(corr[peak_idx])
+    median_val = np.median(np.abs(corr))
+    confidence = peak_val / median_val if median_val > 0 else float("inf")
+    print(f"Correlation confidence: {confidence:.1f}x above median")
+    if confidence < 5:
+        print("WARNING: Low correlation confidence — alignment may be inaccurate")
+
+    # Apply offset
+    if offset >= 0:
+        deg_aligned = deg[offset:]
+    else:
+        ref = ref[abs(offset):]
+        deg_aligned = deg
+
+    min_len = min(len(ref), len(deg_aligned))
+    info = {
+        "offset_samples": offset,
+        "confidence": confidence,
+    }
+    return ref[:min_len], deg_aligned[:min_len], info
+
+
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+def normalize_rms(ref, deg):
+    """Scale degraded signal to match reference RMS level. Returns (deg_scaled, gain_db)."""
+    ref_mono = ref.mean(axis=1) if ref.ndim > 1 else ref
+    deg_mono = deg.mean(axis=1) if deg.ndim > 1 else deg
+    rms_ref = np.sqrt(np.mean(ref_mono ** 2))
+    rms_deg = np.sqrt(np.mean(deg_mono ** 2))
+    if rms_deg > 0:
+        gain = rms_ref / rms_deg
+        gain_db = 20 * np.log10(gain)
+        return deg * gain, gain_db
+    return deg, 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +339,81 @@ def run_pesq(ref, deg, sr):
     }
 
 
+def run_polqa(ref_path, deg_path, sr=44100):
+    """POLQA (ITU-T P.863) via command-line binary."""
+    polqa_bin = shutil.which("polqa")
+    if not polqa_bin:
+        print("  POLQA: not available (install polqa)")
+        return None
+
+    # POLQA SWB/fullband expects 48 kHz; resample if needed
+    target_sr = 48000
+    tmpdir_resamp = None
+    if sr != target_sr:
+        from scipy.signal import resample_poly
+        from math import gcd
+
+        tmpdir_resamp = tempfile.mkdtemp(prefix="amaf_polqa_")
+        g = gcd(sr, target_sr)
+
+        ref_48k_path = os.path.join(tmpdir_resamp, "ref_48k.wav")
+        deg_48k_path = os.path.join(tmpdir_resamp, "deg_48k.wav")
+
+        ref_data, _ = sf.read(ref_path, dtype="float64")
+        deg_data, _ = sf.read(deg_path, dtype="float64")
+
+        if ref_data.ndim > 1:
+            ref_48k = np.column_stack([
+                resample_poly(ref_data[:, ch], target_sr // g, sr // g)
+                for ch in range(ref_data.shape[1])
+            ])
+        else:
+            ref_48k = resample_poly(ref_data, target_sr // g, sr // g)
+
+        if deg_data.ndim > 1:
+            deg_48k = np.column_stack([
+                resample_poly(deg_data[:, ch], target_sr // g, sr // g)
+                for ch in range(deg_data.shape[1])
+            ])
+        else:
+            deg_48k = resample_poly(deg_data, target_sr // g, sr // g)
+
+        sf.write(ref_48k_path, ref_48k, target_sr, subtype="PCM_24")
+        sf.write(deg_48k_path, deg_48k, target_sr, subtype="PCM_24")
+        ref_path = ref_48k_path
+        deg_path = deg_48k_path
+
+    try:
+        result = subprocess.run(
+            [polqa_bin, "-ref", ref_path, "-deg", deg_path, "-mode", "SWB"],
+            capture_output=True, text=True, timeout=300,
+        )
+        output = result.stdout + result.stderr
+        mos = None
+        for line in output.splitlines():
+            low = line.lower()
+            # Common output formats: "MOS-LQO: 4.23" or "Score: 4.23"
+            if "mos" in low and ":" in line:
+                try:
+                    mos = float(line.split(":")[-1].strip())
+                except ValueError:
+                    pass
+            elif "score" in low and ":" in line and mos is None:
+                try:
+                    mos = float(line.split(":")[-1].strip())
+                except ValueError:
+                    pass
+        if mos is not None:
+            return {"mos_lqo": mos}
+        return {"raw_output": output}
+    except Exception as e:
+        print(f"  POLQA: error ({e})")
+        return None
+    finally:
+        if tmpdir_resamp:
+            shutil.rmtree(tmpdir_resamp, ignore_errors=True)
+
+
 def run_peaq(ref_path, deg_path):
     """PEAQ via gstpeaq (GStreamer plugin)."""
     if not shutil.which("gstpeaq"):
@@ -338,21 +469,45 @@ def run_visqol(ref_path, deg_path):
 # Main
 # ---------------------------------------------------------------------------
 
-def run_measurement(captured_path, report_path=None, plots_dir=None, audio_dir=None):
+def run_measurement(captured_path, report_path=None, plots_dir=None, audio_dir=None, normalize=False, label=None):
     """Run full measurement pipeline. Returns dict of all results."""
     from report import generate_report, generate_plots as _generate_plots
+    from video import (is_video_file, has_video_stream, has_audio_stream,
+                       extract_audio, get_video_info,
+                       align_video_chirp, trim_video, run_video_metrics)
+
+    input_is_video = is_video_file(captured_path) and has_video_stream(captured_path)
+
+    # For video input, extract the audio track
+    audio_tmp = None
+    if input_is_video:
+        if has_audio_stream(captured_path):
+            audio_tmp = os.path.join(tempfile.gettempdir(), f"amaf_audio_{os.getpid()}.wav")
+            extract_audio(captured_path, audio_tmp)
+            captured_audio = audio_tmp
+        else:
+            captured_audio = None
+    else:
+        captured_audio = captured_path
 
     ref, sr_ref = sf.read(REFERENCE_PATH, dtype="float64", always_2d=True)
-    try:
-        deg, sr_deg = sf.read(captured_path, dtype="float64", always_2d=True)
-    except Exception:
-        tmp_wav = os.path.join(tempfile.gettempdir(), "amaf_decoded.wav")
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", captured_path, "-acodec", "pcm_s24le", tmp_wav],
-            capture_output=True, check=True,
-        )
-        deg, sr_deg = sf.read(tmp_wav, dtype="float64", always_2d=True)
-        os.remove(tmp_wav)
+
+    # Load audio (from extracted track or directly)
+    if captured_audio:
+        try:
+            deg, sr_deg = sf.read(captured_audio, dtype="float64", always_2d=True)
+        except Exception:
+            tmp_wav = os.path.join(tempfile.gettempdir(), "amaf_decoded.wav")
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", captured_audio, "-acodec", "pcm_s24le", tmp_wav],
+                capture_output=True, check=True,
+            )
+            deg, sr_deg = sf.read(tmp_wav, dtype="float64", always_2d=True)
+            os.remove(tmp_wav)
+    else:
+        # Video with no audio track — create silent placeholder
+        deg = np.zeros_like(ref)
+        sr_deg = sr_ref
 
     if sr_ref != sr_deg:
         from scipy.signal import resample_poly
@@ -370,11 +525,19 @@ def run_measurement(captured_path, report_path=None, plots_dir=None, audio_dir=N
     ref_content = ref_aligned[skip_samples:]
     deg_content = deg_aligned[skip_samples:]
 
+    # Normalize level if requested
+    gain_db = 0.0
+    if normalize:
+        deg_content, gain_db = normalize_rms(ref_content, deg_content)
+        print(f"Normalization: applied {gain_db:+.2f} dB gain to processed signal")
+
     # Save aligned audio for A/B playback
     if audio_dir:
         os.makedirs(audio_dir, exist_ok=True)
         sf.write(os.path.join(audio_dir, "reference.wav"), ref_content, sr_ref, subtype="PCM_16")
         sf.write(os.path.join(audio_dir, "processed.wav"), deg_content, sr_ref, subtype="PCM_16")
+        diff_signal = ref_content - deg_content
+        sf.write(os.path.join(audio_dir, "difference.wav"), diff_signal, sr_ref, subtype="PCM_16")
 
     spec = spectral_difference(ref_content, deg_content, sr_ref)
     snr = snr_thd_n(ref_content, deg_content, sr_ref)
@@ -386,19 +549,58 @@ def run_measurement(captured_path, report_path=None, plots_dir=None, audio_dir=N
     deg_content_path = os.path.join(tmpdir, "deg_content.wav")
     sf.write(ref_content_path, ref_content, sr_ref, subtype="PCM_24")
     sf.write(deg_content_path, deg_content, sr_ref, subtype="PCM_24")
+    polqa_result = run_polqa(ref_content_path, deg_content_path, sr=sr_ref)
     peaq_result = run_peaq(ref_content_path, deg_content_path)
     visqol_result = run_visqol(ref_content_path, deg_content_path)
     shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # --- Video analysis ---
+    video_results = None
+    video_info = None
+    if input_is_video and os.path.exists(REFERENCE_VIDEO_PATH):
+        print("\n--- Video analysis ---")
+        video_info = get_video_info(captured_path)
+        vtmpdir = tempfile.mkdtemp(prefix="amaf_vtrim_")
+        try:
+            valign = align_video_chirp(captured_path)
+            skip_s = 3.0  # luma chirp duration
+            ref_trimmed = os.path.join(vtmpdir, "ref_trimmed.mp4")
+            deg_trimmed = os.path.join(vtmpdir, "deg_trimmed.mp4")
+
+            ref_info = get_video_info(REFERENCE_VIDEO_PATH)
+            ref_dur = ref_info["duration"] - skip_s if ref_info else 60
+            deg_start = skip_s + valign["offset_seconds"]
+
+            trim_video(REFERENCE_VIDEO_PATH, skip_s, ref_dur, ref_trimmed)
+            trim_video(captured_path, max(0, deg_start), ref_dur, deg_trimmed)
+
+            video_results = run_video_metrics(ref_trimmed, deg_trimmed)
+            if video_results:
+                video_results["alignment"] = valign
+                video_results["info"] = video_info
+        except Exception as e:
+            print(f"  Video analysis failed: {e}")
+        finally:
+            shutil.rmtree(vtmpdir, ignore_errors=True)
+    elif input_is_video:
+        video_info = get_video_info(captured_path)
+
+    # Clean up extracted audio
+    if audio_tmp and os.path.exists(audio_tmp):
+        os.remove(audio_tmp)
 
     # Generate PDF report
     if report_path:
         generate_report(
             ref=ref_content, deg=deg_content, sr=sr_ref,
             spec_results=spec, snr_results=snr,
-            pesq_results=pesq_result, peaq_results=peaq_result,
+            pesq_results=pesq_result, polqa_results=polqa_result,
+            peaq_results=peaq_result,
             visqol_results=visqol_result,
             captured_path=captured_path, alignment_info=alignment_info,
             output_path=report_path,
+            video_results=video_results,
+            label=label,
         )
 
     # Generate web plots
@@ -408,16 +610,181 @@ def run_measurement(captured_path, report_path=None, plots_dir=None, audio_dir=N
             spec_results=spec, snr_results=snr,
             pesq_results=pesq_result,
             output_dir=plots_dir,
+            video_results=video_results,
         )
 
     return {
         "alignment": alignment_info,
         "duration_s": len(ref_content) / sr_ref,
+        "normalized": normalize,
+        "gain_db": gain_db,
         "spectral": spec,
         "snr": snr,
         "pesq": pesq_result,
+        "polqa": polqa_result,
         "peaq": peaq_result,
         "visqol": visqol_result,
+        "video": video_results,
+        "video_info": video_info,
+        "has_video": input_is_video,
+    }
+
+
+def run_comparison(ref_path, deg_path, report_path=None, plots_dir=None, audio_dir=None, normalize=False, label=None):
+    """Run measurement comparing a user-supplied reference to a processed file."""
+    from report import generate_report, generate_plots as _generate_plots
+    from video import (is_video_file, has_video_stream, has_audio_stream,
+                       extract_audio, get_video_info,
+                       align_video_signals, trim_video, run_video_metrics)
+
+    ref_is_video = is_video_file(ref_path) and has_video_stream(ref_path)
+    deg_is_video = is_video_file(deg_path) and has_video_stream(deg_path)
+    input_is_video = ref_is_video and deg_is_video
+
+    # Extract audio from video files
+    audio_tmps = []
+
+    def _load(path):
+        if is_video_file(path) and has_audio_stream(path):
+            tmp = os.path.join(tempfile.gettempdir(), f"amaf_cmp_{os.getpid()}_{len(audio_tmps)}.wav")
+            extract_audio(path, tmp)
+            audio_tmps.append(tmp)
+            return sf.read(tmp, dtype="float64", always_2d=True)
+        try:
+            return sf.read(path, dtype="float64", always_2d=True)
+        except Exception:
+            tmp_wav = os.path.join(tempfile.gettempdir(), "amaf_decoded.wav")
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", path, "-acodec", "pcm_s24le", tmp_wav],
+                capture_output=True, check=True,
+            )
+            data, sr = sf.read(tmp_wav, dtype="float64", always_2d=True)
+            os.remove(tmp_wav)
+            return data, sr
+
+    ref, sr_ref = _load(ref_path)
+    deg, sr_deg = _load(deg_path)
+
+    # Resample degraded to match reference if needed
+    if sr_ref != sr_deg:
+        from scipy.signal import resample_poly
+        from math import gcd
+        g = gcd(sr_deg, sr_ref)
+        channels = []
+        for ch in range(deg.shape[1]):
+            channels.append(resample_poly(deg[:, ch], sr_ref // g, sr_deg // g))
+        deg = np.column_stack(channels)
+
+    # Match channel count
+    if ref.shape[1] != deg.shape[1]:
+        if ref.shape[1] == 1:
+            ref = np.column_stack([ref[:, 0], ref[:, 0]])
+        elif deg.shape[1] == 1:
+            deg = np.column_stack([deg[:, 0], deg[:, 0]])
+        else:
+            ref = ref[:, :1].mean(axis=1, keepdims=True)
+            deg = deg[:, :1].mean(axis=1, keepdims=True)
+
+    ref_aligned, deg_aligned, alignment_info = align_signals(ref, deg, sr_ref)
+
+    # Normalize level if requested
+    gain_db = 0.0
+    if normalize:
+        deg_aligned, gain_db = normalize_rms(ref_aligned, deg_aligned)
+        print(f"Normalization: applied {gain_db:+.2f} dB gain to processed signal")
+
+    if audio_dir:
+        os.makedirs(audio_dir, exist_ok=True)
+        sf.write(os.path.join(audio_dir, "reference.wav"), ref_aligned, sr_ref, subtype="PCM_16")
+        sf.write(os.path.join(audio_dir, "processed.wav"), deg_aligned, sr_ref, subtype="PCM_16")
+        diff_signal = ref_aligned - deg_aligned
+        sf.write(os.path.join(audio_dir, "difference.wav"), diff_signal, sr_ref, subtype="PCM_16")
+
+    spec = spectral_difference(ref_aligned, deg_aligned, sr_ref)
+    snr = snr_thd_n(ref_aligned, deg_aligned, sr_ref)
+    pesq_result = run_pesq(ref_aligned, deg_aligned, sr_ref)
+
+    tmpdir = tempfile.mkdtemp(prefix="amaf_")
+    ref_content_path = os.path.join(tmpdir, "ref_content.wav")
+    deg_content_path = os.path.join(tmpdir, "deg_content.wav")
+    sf.write(ref_content_path, ref_aligned, sr_ref, subtype="PCM_24")
+    sf.write(deg_content_path, deg_aligned, sr_ref, subtype="PCM_24")
+    polqa_result = run_polqa(ref_content_path, deg_content_path, sr=sr_ref)
+    peaq_result = run_peaq(ref_content_path, deg_content_path)
+    visqol_result = run_visqol(ref_content_path, deg_content_path)
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # --- Video analysis (compare mode) ---
+    video_results = None
+    video_info = None
+    if input_is_video:
+        print("\n--- Video analysis ---")
+        video_info = get_video_info(deg_path)
+        vtmpdir = tempfile.mkdtemp(prefix="amaf_vtrim_")
+        try:
+            valign = align_video_signals(ref_path, deg_path)
+            ref_info = get_video_info(ref_path)
+            ref_dur = ref_info["duration"] if ref_info else 60
+            deg_start = max(0, valign["offset_seconds"])
+            ref_start = max(0, -valign["offset_seconds"])
+
+            ref_trimmed = os.path.join(vtmpdir, "ref_trimmed.mp4")
+            deg_trimmed = os.path.join(vtmpdir, "deg_trimmed.mp4")
+            trim_video(ref_path, ref_start, ref_dur, ref_trimmed)
+            trim_video(deg_path, deg_start, ref_dur, deg_trimmed)
+
+            video_results = run_video_metrics(ref_trimmed, deg_trimmed)
+            if video_results:
+                video_results["alignment"] = valign
+                video_results["info"] = video_info
+        except Exception as e:
+            print(f"  Video analysis failed: {e}")
+        finally:
+            shutil.rmtree(vtmpdir, ignore_errors=True)
+
+    # Clean up extracted audio temps
+    for tmp in audio_tmps:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+    # Generate PDF report
+    if report_path:
+        generate_report(
+            ref=ref_aligned, deg=deg_aligned, sr=sr_ref,
+            spec_results=spec, snr_results=snr,
+            pesq_results=pesq_result, polqa_results=polqa_result,
+            peaq_results=peaq_result,
+            visqol_results=visqol_result,
+            captured_path=deg_path, alignment_info=alignment_info,
+            output_path=report_path,
+            video_results=video_results,
+            label=label,
+        )
+
+    # Generate web plots
+    if plots_dir:
+        _generate_plots(
+            ref=ref_aligned, deg=deg_aligned, sr=sr_ref,
+            spec_results=spec, snr_results=snr,
+            pesq_results=pesq_result,
+            output_dir=plots_dir,
+            video_results=video_results,
+        )
+
+    return {
+        "alignment": alignment_info,
+        "duration_s": len(ref_aligned) / sr_ref,
+        "normalized": normalize,
+        "gain_db": gain_db,
+        "spectral": spec,
+        "snr": snr,
+        "pesq": pesq_result,
+        "polqa": polqa_result,
+        "peaq": peaq_result,
+        "visqol": visqol_result,
+        "video": video_results,
+        "video_info": video_info,
+        "has_video": input_is_video,
     }
 
 
@@ -444,6 +811,7 @@ def main():
     spec = results["spectral"]
     snr = results["snr"]
     pesq_result = results["pesq"]
+    polqa_result = results["polqa"]
     peaq_result = results["peaq"]
     visqol_result = results["visqol"]
     alignment_info = results["alignment"]
@@ -458,6 +826,8 @@ def main():
     print(f"  THD+N:             {snr['thd_n_pct']:.4f}%")
     if pesq_result:
         print(f"  PESQ MOS-LQO:      {pesq_result['mos_lqo_mean']:.3f}")
+    if polqa_result and "mos_lqo" in polqa_result:
+        print(f"  POLQA MOS-LQO:     {polqa_result['mos_lqo']:.3f}")
     if peaq_result and peaq_result.get("odg") is not None:
         print(f"  PEAQ ODG:          {peaq_result['odg']}")
     if visqol_result and "moslqo" in visqol_result:

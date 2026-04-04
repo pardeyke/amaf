@@ -59,9 +59,12 @@ def to_mono(audio):
 def generate_report(
     ref, deg, sr,
     spec_results, snr_results, pesq_results,
-    peaq_results, visqol_results,
-    captured_path, alignment_info,
+    polqa_results=None,
+    peaq_results=None, visqol_results=None,
+    captured_path="", alignment_info=None,
     output_path="report.pdf",
+    video_results=None,
+    label=None,
 ):
     _setup_style()
 
@@ -82,9 +85,16 @@ def generate_report(
         fig.text(0.5, 0.97, "AMAF — Audio Quality Report",
                  ha="center", va="top", fontsize=18, fontweight="bold",
                  color=COLORS["text"])
-        fig.text(0.5, 0.945,
-                 f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                 ha="center", va="top", fontsize=9, color=COLORS["muted"])
+        if label:
+            fig.text(0.5, 0.945, label,
+                     ha="center", va="top", fontsize=11, color=COLORS["text"])
+            fig.text(0.5, 0.925,
+                     f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                     ha="center", va="top", fontsize=9, color=COLORS["muted"])
+        else:
+            fig.text(0.5, 0.945,
+                     f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                     ha="center", va="top", fontsize=9, color=COLORS["muted"])
 
         # --- Summary metrics panel ---
         ax_summary = fig.add_subplot(gs[0, :])
@@ -117,6 +127,9 @@ def generate_report(
         if pesq_results:
             metrics.append(("PESQ MOS", f"{pesq_results['mos_lqo_mean']:.2f}",
                             _score_color(pesq_results["mos_lqo_mean"], 4.0, 3.5)))
+        if polqa_results and "mos_lqo" in polqa_results:
+            metrics.append(("POLQA MOS", f"{polqa_results['mos_lqo']:.2f}",
+                            _score_color(polqa_results["mos_lqo"], 4.0, 3.5)))
         if peaq_results and peaq_results.get("odg") is not None:
             metrics.append(("PEAQ ODG", f"{peaq_results['odg']:.2f}",
                             _score_color(peaq_results["odg"], -1, -2)))
@@ -364,7 +377,7 @@ def generate_report(
                   ha="center", va="top", fontsize=14, fontweight="bold",
                   color=COLORS["text"])
 
-        ax_table = fig3.add_axes([0.1, 0.55, 0.8, 0.35])
+        ax_table = fig3.add_axes([0.1, 0.15, 0.8, 0.75])
         ax_table.axis("off")
 
         rows = [
@@ -388,6 +401,9 @@ def generate_report(
             rows.append(["PESQ MOS-LQO (mean)", f"{pesq_results['mos_lqo_mean']:.3f}"])
             rows.append(["PESQ MOS-LQO (min)", f"{pesq_results['mos_lqo_min']:.3f}"])
             rows.append(["PESQ MOS-LQO (max)", f"{pesq_results['mos_lqo_max']:.3f}"])
+        if polqa_results and "mos_lqo" in polqa_results:
+            rows.append(["", ""])
+            rows.append(["POLQA MOS-LQO (P.863)", f"{polqa_results['mos_lqo']:.3f}"])
         if peaq_results and peaq_results.get("odg") is not None:
             rows.append(["", ""])
             rows.append(["PEAQ ODG", f"{peaq_results['odg']:.2f}"])
@@ -420,46 +436,6 @@ def generate_report(
                 cell.set_facecolor("#F5F5F5")
             else:
                 cell.set_facecolor("white")
-
-        # Pipeline diagram
-        ax_pipe = fig3.add_axes([0.1, 0.1, 0.8, 0.35])
-        ax_pipe.axis("off")
-        ax_pipe.set_xlim(0, 10)
-        ax_pipe.set_ylim(0, 6)
-
-        ax_pipe.text(5, 5.5, "Signal Chain", ha="center", fontsize=11,
-                     fontweight="bold", color=COLORS["text"])
-
-        stages = [
-            "Reference\nWAV", "Playout", "Soundcraft\nUI 4",
-            "SDI\nEmbedder", "AWS\nElemental", "Wildmoka", "YouTube",
-            "Captured\nWAV",
-        ]
-        n = len(stages)
-        box_w = 0.9
-        gap = (10 - n * box_w) / (n + 1)
-
-        for i, stage in enumerate(stages):
-            x = gap + i * (box_w + gap)
-            is_endpoint = i == 0 or i == n - 1
-            fc = COLORS["ref"] if i == 0 else (COLORS["deg"] if i == n - 1
-                                                 else "#ECEFF1")
-            tc = "white" if is_endpoint else COLORS["text"]
-            rect = plt.Rectangle((x, 2.5), box_w, 1.8,
-                                  facecolor=fc, edgecolor=COLORS["grid"],
-                                  linewidth=1, transform=ax_pipe.transData,
-                                  clip_on=False, zorder=2)
-            ax_pipe.add_patch(rect)
-            ax_pipe.text(x + box_w / 2, 3.4, stage, ha="center", va="center",
-                        fontsize=6.5, fontweight="bold" if is_endpoint else "normal",
-                        color=tc, zorder=3)
-            if i < n - 1:
-                ax_pipe.annotate("", xy=(x + box_w + gap * 0.15, 3.4),
-                                xytext=(x + box_w + 0.02, 3.4),
-                                arrowprops=dict(arrowstyle="->",
-                                               color=COLORS["muted"],
-                                               lw=1.2),
-                                zorder=1)
 
         pdf.savefig(fig3)
         plt.close(fig3)
@@ -511,6 +487,7 @@ def generate_plots(
     ref, deg, sr,
     spec_results, snr_results, pesq_results,
     output_dir,
+    video_results=None,
 ):
     """Generate individual plot PNGs for the web detail view."""
     _dark_style()
@@ -715,3 +692,24 @@ def generate_plots(
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "diff_spectrogram.png"), dpi=DPI)
     plt.close(fig)
+
+    # --- Per-frame VMAF (if video results available) ---
+    if video_results and video_results.get("per_frame"):
+        per_frame = video_results["per_frame"]
+        vmaf_vals = [f.get("vmaf") for f in per_frame if f.get("vmaf") is not None]
+        if vmaf_vals:
+            fps = video_results.get("info", {}).get("fps", 30)
+            t_vid = np.arange(len(vmaf_vals)) / fps
+
+            fig, ax = plt.subplots(figsize=(12, 3.5))
+            ax.plot(t_vid, vmaf_vals, color=DARK["ref"], linewidth=0.6)
+            ax.axhline(y=90, color=DARK["good"], linestyle="--", alpha=0.5, linewidth=0.8)
+            ax.axhline(y=70, color=DARK["warn"], linestyle="--", alpha=0.5, linewidth=0.8)
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("VMAF Score")
+            ax.set_title("Per-Frame VMAF", fontweight="bold")
+            ax.set_ylim(0, 100)
+            ax.set_xlim(0, t_vid[-1] if len(t_vid) > 0 else 1)
+            fig.tight_layout()
+            fig.savefig(os.path.join(output_dir, "vmaf_per_frame.png"), dpi=DPI)
+            plt.close(fig)

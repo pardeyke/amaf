@@ -112,6 +112,17 @@ def build_reference(track_nums, output_path=None):
     return output_path, total_duration
 
 
+def build_video_reference(track_nums, resolution="1920x1080", fps=30,
+                          output_path=None):
+    """Build a video reference with luminance chirp sync + test pattern + audio.
+
+    Returns (output_path, total_duration).
+    """
+    from video import build_reference_video
+    return build_reference_video(track_nums, resolution=resolution, fps=fps,
+                                 output_path=output_path)
+
+
 def main():
     print("Building reference from default tracks:", DEFAULT_TRACKS)
     path, duration = build_reference(DEFAULT_TRACKS)

@@ -16,9 +16,10 @@ from flask import (
     render_template_string, send_file, jsonify,
 )
 
-from measure import run_measurement
+from measure import run_measurement, run_comparison
 from report import generate_plots
-from generate_reference import get_sqam_tracks, build_reference
+from generate_reference import get_sqam_tracks, build_reference, build_video_reference
+from video import MEDIA_EXTENSIONS
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -52,13 +53,36 @@ def init_db():
             null_depth_db REAL,
             thd_n_pct REAL,
             pesq_mos REAL,
+            polqa_mos REAL,
             peaq_odg REAL,
             visqol_mos REAL,
             latency_s REAL,
             duration_s REAL,
-            results_json TEXT
+            results_json TEXT,
+            mode TEXT NOT NULL DEFAULT 'chirp',
+            ref_name TEXT,
+            normalize INTEGER NOT NULL DEFAULT 0,
+            vmaf_score REAL,
+            psnr_avg REAL,
+            ssim_avg REAL,
+            has_video INTEGER NOT NULL DEFAULT 0
         )
     """)
+    # Migrate existing tables
+    for col, defn in [
+        ("mode", "TEXT NOT NULL DEFAULT 'chirp'"),
+        ("ref_name", "TEXT"),
+        ("normalize", "INTEGER NOT NULL DEFAULT 0"),
+        ("polqa_mos", "REAL"),
+        ("vmaf_score", "REAL"),
+        ("psnr_avg", "REAL"),
+        ("ssim_avg", "REAL"),
+        ("has_video", "INTEGER NOT NULL DEFAULT 0"),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE measurements ADD COLUMN {col} {defn}")
+        except Exception:
+            pass
     db.commit()
     db.close()
 
@@ -67,26 +91,30 @@ def init_db():
 # Background processing
 # ---------------------------------------------------------------------------
 
-def process_measurement(measurement_id, audio_path, filename):
+def process_comparison(measurement_id, ref_path, deg_path, normalize=False, label=None):
     db = get_db()
     try:
         report_path = os.path.join(DATA_DIR, f"{measurement_id}.pdf")
         plots_dir = os.path.join(DATA_DIR, f"{measurement_id}_plots")
         audio_dir = os.path.join(DATA_DIR, f"{measurement_id}_audio")
-        results = run_measurement(audio_path, report_path, plots_dir=plots_dir, audio_dir=audio_dir)
+        results = run_comparison(ref_path, deg_path, report_path, plots_dir=plots_dir, audio_dir=audio_dir, normalize=normalize, label=label)
 
         spec = results["spectral"]
         snr = results["snr"]
         pesq_r = results["pesq"]
+        polqa_r = results.get("polqa")
         peaq_r = results["peaq"]
         visqol_r = results["visqol"]
-        align = results["alignment"]
+        align_info = results["alignment"]
+        video_r = results.get("video")
+        has_video = 1 if results.get("has_video") else 0
 
         db.execute("""
             UPDATE measurements SET
                 status = 'done',
                 snr_db = ?, null_depth_db = ?, thd_n_pct = ?,
-                pesq_mos = ?, peaq_odg = ?, visqol_mos = ?,
+                pesq_mos = ?, polqa_mos = ?, peaq_odg = ?, visqol_mos = ?,
+                vmaf_score = ?, psnr_avg = ?, ssim_avg = ?, has_video = ?,
                 latency_s = ?, duration_s = ?,
                 results_json = ?
             WHERE id = ?
@@ -95,8 +123,65 @@ def process_measurement(measurement_id, audio_path, filename):
             spec["null_depth_db"],
             snr["thd_n_pct"],
             pesq_r["mos_lqo_mean"] if pesq_r else None,
+            polqa_r["mos_lqo"] if polqa_r and "mos_lqo" in polqa_r else None,
             peaq_r["odg"] if peaq_r and peaq_r.get("odg") is not None else None,
             visqol_r["moslqo"] if visqol_r and "moslqo" in visqol_r else None,
+            video_r["vmaf_score"] if video_r else None,
+            video_r["psnr_avg"] if video_r else None,
+            video_r["ssim_avg"] if video_r else None,
+            has_video,
+            align_info["offset_samples"] / 44100,
+            results["duration_s"],
+            json.dumps(results, default=str),
+            measurement_id,
+        ))
+    except Exception as e:
+        db.execute("UPDATE measurements SET status = 'error', error = ? WHERE id = ?",
+                   (str(e), measurement_id))
+    finally:
+        db.commit()
+        db.close()
+
+
+def process_measurement(measurement_id, audio_path, filename, normalize=False, label=None):
+    db = get_db()
+    try:
+        report_path = os.path.join(DATA_DIR, f"{measurement_id}.pdf")
+        plots_dir = os.path.join(DATA_DIR, f"{measurement_id}_plots")
+        audio_dir = os.path.join(DATA_DIR, f"{measurement_id}_audio")
+        results = run_measurement(audio_path, report_path, plots_dir=plots_dir, audio_dir=audio_dir, normalize=normalize, label=label)
+
+        spec = results["spectral"]
+        snr = results["snr"]
+        pesq_r = results["pesq"]
+        polqa_r = results.get("polqa")
+        peaq_r = results["peaq"]
+        visqol_r = results["visqol"]
+        align = results["alignment"]
+        video_r = results.get("video")
+        has_video = 1 if results.get("has_video") else 0
+
+        db.execute("""
+            UPDATE measurements SET
+                status = 'done',
+                snr_db = ?, null_depth_db = ?, thd_n_pct = ?,
+                pesq_mos = ?, polqa_mos = ?, peaq_odg = ?, visqol_mos = ?,
+                vmaf_score = ?, psnr_avg = ?, ssim_avg = ?, has_video = ?,
+                latency_s = ?, duration_s = ?,
+                results_json = ?
+            WHERE id = ?
+        """, (
+            snr["snr_db"],
+            spec["null_depth_db"],
+            snr["thd_n_pct"],
+            pesq_r["mos_lqo_mean"] if pesq_r else None,
+            polqa_r["mos_lqo"] if polqa_r and "mos_lqo" in polqa_r else None,
+            peaq_r["odg"] if peaq_r and peaq_r.get("odg") is not None else None,
+            visqol_r["moslqo"] if visqol_r and "moslqo" in visqol_r else None,
+            video_r["vmaf_score"] if video_r else None,
+            video_r["psnr_avg"] if video_r else None,
+            video_r["ssim_avg"] if video_r else None,
+            has_video,
             align["offset_samples"] / 44100,
             results["duration_s"],
             json.dumps(results, default=str),
@@ -131,6 +216,7 @@ def upload():
         return redirect(url_for("index"))
 
     label = request.form.get("label", "").strip()
+    normalize = bool(request.form.get("normalize"))
     mid = uuid.uuid4().hex[:12]
     ext = os.path.splitext(f.filename)[1] or ".wav"
     audio_path = os.path.join(DATA_DIR, f"{mid}{ext}")
@@ -138,14 +224,49 @@ def upload():
 
     db = get_db()
     db.execute(
-        "INSERT INTO measurements (id, filename, label, created_at, status) VALUES (?, ?, ?, ?, ?)",
-        (mid, f.filename, label or None, datetime.now().isoformat(), "processing"),
+        "INSERT INTO measurements (id, filename, label, created_at, status, normalize) VALUES (?, ?, ?, ?, ?, ?)",
+        (mid, f.filename, label or None, datetime.now().isoformat(), "processing", int(normalize)),
     )
     db.commit()
     db.close()
 
     thread = threading.Thread(
-        target=process_measurement, args=(mid, audio_path, f.filename), daemon=True
+        target=process_measurement, args=(mid, audio_path, f.filename, normalize, label or None), daemon=True
+    )
+    thread.start()
+
+    return redirect(url_for("index"))
+
+
+@app.route("/compare", methods=["POST"])
+def compare():
+    ref_file = request.files.get("reference")
+    deg_file = request.files.get("processed")
+    if not ref_file or not ref_file.filename or not deg_file or not deg_file.filename:
+        return redirect(url_for("index"))
+
+    ref_name = request.form.get("ref_name", "").strip() or ref_file.filename
+    label = request.form.get("label", "").strip()
+    normalize = bool(request.form.get("normalize"))
+    mid = uuid.uuid4().hex[:12]
+
+    ref_ext = os.path.splitext(ref_file.filename)[1] or ".wav"
+    deg_ext = os.path.splitext(deg_file.filename)[1] or ".wav"
+    ref_path = os.path.join(DATA_DIR, f"{mid}_ref{ref_ext}")
+    deg_path = os.path.join(DATA_DIR, f"{mid}{deg_ext}")
+    ref_file.save(ref_path)
+    deg_file.save(deg_path)
+
+    db = get_db()
+    db.execute(
+        "INSERT INTO measurements (id, filename, label, created_at, status, mode, ref_name, normalize) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (mid, deg_file.filename, label or None, datetime.now().isoformat(), "processing", "compare", ref_name, int(normalize)),
+    )
+    db.commit()
+    db.close()
+
+    thread = threading.Thread(
+        target=process_comparison, args=(mid, ref_path, deg_path, normalize, label or None), daemon=True
     )
     thread.start()
 
@@ -176,7 +297,7 @@ def plot(mid, name):
 
 @app.route("/audio/<mid>/<name>")
 def audio(mid, name):
-    if name not in ("reference.wav", "processed.wav"):
+    if name not in ("reference.wav", "processed.wav", "difference.wav"):
         return "Not found", 404
     path = os.path.join(DATA_DIR, f"{mid}_audio", name)
     if not os.path.exists(path):
@@ -202,6 +323,74 @@ def status(mid):
     return jsonify({"status": row["status"]})
 
 
+@app.route("/reprocess/<mid>", methods=["POST"])
+def reprocess(mid):
+    db = get_db()
+    row = db.execute("SELECT * FROM measurements WHERE id = ?", (mid,)).fetchone()
+    if not row:
+        db.close()
+        return "Not found", 404
+
+    # Find original source file(s) on disk
+    media_exts = (".wav", ".m4a", ".mp3", ".flac", ".ogg", ".opus", ".aac",
+                  ".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts")
+    deg_path = None
+    for ext in media_exts:
+        p = os.path.join(DATA_DIR, f"{mid}{ext}")
+        if os.path.exists(p):
+            deg_path = p
+            break
+
+    if not deg_path:
+        db.close()
+        return "Source audio file not found — cannot reprocess", 400
+
+    mode = row["mode"] or "chirp"
+    normalize = bool(request.form.get("normalize"))
+
+    # For compare mode, find the reference file
+    ref_path = None
+    if mode == "compare":
+        for ext in media_exts:
+            p = os.path.join(DATA_DIR, f"{mid}_ref{ext}")
+            if os.path.exists(p):
+                ref_path = p
+                break
+        if not ref_path:
+            db.close()
+            return "Reference audio file not found — cannot reprocess", 400
+
+    # Reset status and clear old results
+    db.execute("UPDATE measurements SET status = 'processing', error = NULL, results_json = NULL, normalize = ? WHERE id = ?", (int(normalize), mid))
+    db.commit()
+    db.close()
+
+    # Clean up old outputs
+    import shutil as _shutil
+    pdf_path = os.path.join(DATA_DIR, f"{mid}.pdf")
+    if os.path.exists(pdf_path):
+        os.remove(pdf_path)
+    plots_dir = os.path.join(DATA_DIR, f"{mid}_plots")
+    if os.path.isdir(plots_dir):
+        _shutil.rmtree(plots_dir, ignore_errors=True)
+    audio_dir = os.path.join(DATA_DIR, f"{mid}_audio")
+    if os.path.isdir(audio_dir):
+        _shutil.rmtree(audio_dir, ignore_errors=True)
+
+    reprocess_label = row["label"]
+    if mode == "compare":
+        thread = threading.Thread(
+            target=process_comparison, args=(mid, ref_path, deg_path, normalize, reprocess_label), daemon=True
+        )
+    else:
+        thread = threading.Thread(
+            target=process_measurement, args=(mid, deg_path, row["filename"], normalize, reprocess_label), daemon=True
+        )
+    thread.start()
+
+    return redirect(url_for("index"))
+
+
 @app.route("/delete/<mid>", methods=["POST"])
 def delete(mid):
     db = get_db()
@@ -209,10 +398,15 @@ def delete(mid):
     db.commit()
     db.close()
     # Clean up files
-    for ext in (".pdf", ".wav", ".m4a", ".mp3", ".flac", ".ogg", ".opus", ".aac"):
+    for ext in (".pdf", ".wav", ".m4a", ".mp3", ".flac", ".ogg", ".opus", ".aac",
+                ".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts"):
         p = os.path.join(DATA_DIR, f"{mid}{ext}")
         if os.path.exists(p):
             os.remove(p)
+        # Also clean up compare-mode reference files
+        p_ref = os.path.join(DATA_DIR, f"{mid}_ref{ext}")
+        if os.path.exists(p_ref):
+            os.remove(p_ref)
     import shutil
     plots_dir = os.path.join(DATA_DIR, f"{mid}_plots")
     if os.path.isdir(plots_dir):
@@ -233,9 +427,13 @@ def reference_builder():
     ref_path = os.path.join(BASE_DIR, "reference.wav")
     ref_exists = os.path.exists(ref_path)
     ref_size = os.path.getsize(ref_path) if ref_exists else 0
+    vid_path = os.path.join(BASE_DIR, "reference_video.mp4")
+    vid_exists = os.path.exists(vid_path)
+    vid_size = os.path.getsize(vid_path) if vid_exists else 0
     return render_template_string(
         PAGE_REFERENCE, tracks=tracks,
         ref_exists=ref_exists, ref_size=ref_size,
+        vid_exists=vid_exists, vid_size=vid_size,
     )
 
 
@@ -266,6 +464,39 @@ def reference_download():
         return "No reference file yet", 404
     return send_file(path, mimetype="audio/wav", as_attachment=True,
                      download_name="reference.wav")
+
+
+@app.route("/reference/build_video", methods=["POST"])
+def reference_build_video():
+    data = request.get_json()
+    track_nums = data.get("tracks", [])
+    resolution = data.get("resolution", "1920x1080")
+    fps = int(data.get("fps", 30))
+    if not track_nums:
+        return jsonify({"error": "No tracks selected"}), 400
+    try:
+        track_nums = [int(t) for t in track_nums]
+        path, duration = build_video_reference(track_nums, resolution=resolution, fps=fps)
+        size = os.path.getsize(path)
+        return jsonify({
+            "ok": True,
+            "duration": round(duration, 1),
+            "size": size,
+            "tracks": len(track_nums),
+            "resolution": resolution,
+            "fps": fps,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/reference/download_video")
+def reference_download_video():
+    path = os.path.join(BASE_DIR, "reference_video.mp4")
+    if not os.path.exists(path):
+        return "No video reference file yet", 404
+    return send_file(path, mimetype="video/mp4", as_attachment=True,
+                     download_name="reference_video.mp4")
 
 
 # ---------------------------------------------------------------------------
@@ -367,27 +598,61 @@ PAGE_INDEX = r"""
 
   <div class="upload-card" style="display:flex; gap:1.5rem; flex-wrap:wrap; align-items:start;">
     <div style="flex:1; min-width:300px;">
-      <h2>New Measurement</h2>
+      <h2>Chirp Measurement</h2>
+      <p style="font-size:0.8rem; color:var(--muted); margin-bottom:0.75rem;">Upload the captured output after playing the reference through your pipeline. Supports audio and video files.</p>
       <form class="upload-form" method="post" action="/upload" enctype="multipart/form-data">
         <div class="field">
-          <label>Audio file</label>
-          <input type="file" name="audio" accept="audio/*,.wav,.flac,.m4a,.mp3,.ogg,.opus,.aac" required>
+          <label>Captured file</label>
+          <input type="file" name="audio" accept="audio/*,video/*,.wav,.flac,.m4a,.mp3,.ogg,.opus,.aac,.mp4,.mkv,.mov,.webm,.avi,.m4v,.ts" required>
         </div>
         <div class="field">
           <label>Label (optional)</label>
           <input type="text" name="label" placeholder="e.g. YouTube 1080p AAC">
         </div>
+        <div class="field" style="flex-direction:row; align-items:center; gap:0.5rem;">
+          <input type="checkbox" name="normalize" id="norm-chirp" value="1" style="width:auto;">
+          <label for="norm-chirp" style="text-transform:none; font-size:0.85rem; cursor:pointer;">Normalize levels</label>
+        </div>
         <button class="btn" type="submit">Analyse</button>
       </form>
     </div>
     <div style="border-left:1px solid var(--border); padding-left:1.5rem; min-width:200px;">
-      <h2 style="color:var(--accent);">Reference Track</h2>
+      <h2 style="color:var(--accent);">Reference Files</h2>
       <p style="font-size:0.85rem; color:var(--muted); margin-bottom:0.75rem;">
-        Build or download the reference WAV to play through your pipeline.
+        Build or download the reference files to play through your pipeline.
       </p>
       <a href="/reference" class="btn" style="background:var(--accent);">Build Reference</a>
-      <a href="/reference/download" class="btn" style="background:var(--accent2); margin-top:0.5rem;">Download Current</a>
+      <a href="/reference/download" class="btn" style="background:var(--accent2); margin-top:0.5rem;">Audio</a>
+      <a href="/reference/download_video" class="btn" style="background:var(--orange); margin-top:0.5rem;">Video</a>
     </div>
+  </div>
+
+  <div class="upload-card">
+    <h2 style="color:var(--accent2);">Compare Mode</h2>
+    <p style="font-size:0.8rem; color:var(--muted); margin-bottom:0.75rem;">Upload both a reference and a processed sample. Supports audio and video. No chirp needed — the signals are aligned automatically.</p>
+    <form class="upload-form" method="post" action="/compare" enctype="multipart/form-data">
+      <div class="field">
+        <label>Reference file</label>
+        <input type="file" name="reference" accept="audio/*,video/*,.wav,.flac,.m4a,.mp3,.ogg,.opus,.aac,.mp4,.mkv,.mov,.webm,.avi,.m4v,.ts" required>
+      </div>
+      <div class="field">
+        <label>Processed file</label>
+        <input type="file" name="processed" accept="audio/*,video/*,.wav,.flac,.m4a,.mp3,.ogg,.opus,.aac,.mp4,.mkv,.mov,.webm,.avi,.m4v,.ts" required>
+      </div>
+      <div class="field">
+        <label>Reference name</label>
+        <input type="text" name="ref_name" placeholder="e.g. Original master" required>
+      </div>
+      <div class="field">
+        <label>Label (optional)</label>
+        <input type="text" name="label" placeholder="e.g. After MP3 encode">
+      </div>
+      <div class="field" style="flex-direction:row; align-items:center; gap:0.5rem;">
+        <input type="checkbox" name="normalize" id="norm-compare" value="1" style="width:auto;">
+        <label for="norm-compare" style="text-transform:none; font-size:0.85rem; cursor:pointer;">Normalize levels</label>
+      </div>
+      <button class="btn" style="background:var(--accent2);" type="submit">Compare</button>
+    </form>
   </div>
 
   <div class="results">
@@ -397,6 +662,7 @@ PAGE_INDEX = r"""
       <thead>
         <tr>
           <th>Date</th>
+          <th>Mode</th>
           <th>File</th>
           <th>Label</th>
           <th>Status</th>
@@ -404,6 +670,7 @@ PAGE_INDEX = r"""
           <th>Null</th>
           <th>THD+N</th>
           <th>PESQ</th>
+          <th>VMAF</th>
           <th></th>
         </tr>
       </thead>
@@ -411,7 +678,17 @@ PAGE_INDEX = r"""
         {% for m in measurements %}
         <tr data-id="{{ m.id }}" data-status="{{ m.status }}">
           <td>{{ m.created_at[:16] | replace('T', ' ') }}</td>
-          <td class="mono">{{ m.filename[:30] }}</td>
+          <td>
+            {% if m.mode == 'compare' %}
+            <span class="badge" style="background:rgba(78,205,196,0.15); color:var(--accent2);">compare</span>
+            {% else %}
+            <span class="badge" style="background:rgba(108,138,255,0.15); color:var(--accent);">chirp</span>
+            {% endif %}
+            {% if m.has_video %}
+            <span class="badge" style="background:rgba(255,152,0,0.15); color:var(--orange);">video</span>
+            {% endif %}
+          </td>
+          <td class="mono">{{ m.filename[:30] }}{% if m.ref_name %}<br><span style="font-size:0.75rem; color:var(--muted);">ref: {{ m.ref_name[:25] }}</span>{% endif %}</td>
           <td>{{ m.label or '' }}</td>
           <td>
             <span class="badge badge-{{ m.status }}">{{ m.status }}</span>
@@ -427,10 +704,17 @@ PAGE_INDEX = r"""
           <td class="mono {{ 'good' if m.pesq_mos and m.pesq_mos >= 4.0 else ('warn' if m.pesq_mos and m.pesq_mos >= 3.5 else 'bad') }}">
             {{ '%.2f'|format(m.pesq_mos) if m.pesq_mos is not none else '-' }}
           </td>
+          <td class="mono {{ 'good' if m.vmaf_score and m.vmaf_score >= 90 else ('warn' if m.vmaf_score and m.vmaf_score >= 70 else 'bad') }}">
+            {{ '%.1f'|format(m.vmaf_score) if m.vmaf_score is not none else '-' }}
+          </td>
           <td>
             <div class="actions">
               <a href="/result/{{ m.id }}" class="btn btn-sm">Details</a>
               <a href="/report/{{ m.id }}" class="btn btn-sm" style="background:var(--accent2)">PDF</a>
+              <form method="post" action="/reprocess/{{ m.id }}" style="display:inline-flex; align-items:center; gap:0.3rem;">
+                <input type="checkbox" name="normalize" value="1" {{ 'checked' if m.normalize else '' }} title="Normalize levels" style="margin:0;">
+                <button class="btn btn-sm" style="background:var(--orange)" type="submit">Reprocess</button>
+              </form>
               <form method="post" action="/delete/{{ m.id }}" style="display:inline"
                     onsubmit="return confirm('Delete this measurement?')">
                 <button class="btn btn-sm btn-red" type="submit">Del</button>
@@ -438,14 +722,20 @@ PAGE_INDEX = r"""
             </div>
           </td>
           {% elif m.status == 'error' %}
-          <td colspan="5" style="color:var(--red)">{{ m.error[:80] if m.error else 'Unknown error' }}</td>
+          <td colspan="7" style="color:var(--red)">{{ m.error[:80] if m.error else 'Unknown error' }}</td>
           <td>
-            <form method="post" action="/delete/{{ m.id }}" style="display:inline">
-              <button class="btn btn-sm btn-red" type="submit">Del</button>
-            </form>
+            <div class="actions">
+              <form method="post" action="/reprocess/{{ m.id }}" style="display:inline-flex; align-items:center; gap:0.3rem;">
+                <input type="checkbox" name="normalize" value="1" {{ 'checked' if m.normalize else '' }} title="Normalize levels" style="margin:0;">
+                <button class="btn btn-sm" style="background:var(--orange)" type="submit">Reprocess</button>
+              </form>
+              <form method="post" action="/delete/{{ m.id }}" style="display:inline">
+                <button class="btn btn-sm btn-red" type="submit">Del</button>
+              </form>
+            </div>
           </td>
           {% else %}
-          <td colspan="5" style="color:var(--muted)">Processing...</td>
+          <td colspan="7" style="color:var(--muted)">Processing...</td>
           <td></td>
           {% endif %}
         </tr>
@@ -601,8 +891,23 @@ PAGE_REFERENCE = r"""
     <button class="btn btn-outline btn-sm" onclick="selectAll()">Select All</button>
     <button class="btn btn-outline btn-sm" onclick="clearAll()">Clear</button>
     <button class="btn btn-accent2" id="build-btn" onclick="buildReference()" disabled>
-      Build Reference
+      Build Audio Reference
     </button>
+    <button class="btn" style="background:var(--orange);" id="build-video-btn" onclick="buildVideoReference()" disabled>
+      Build Video Reference
+    </button>
+    <select id="vid-res" style="background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:0.3rem 0.5rem; color:var(--text); font-size:0.8rem;">
+      <option value="1920x1080">1080p</option>
+      <option value="1280x720">720p</option>
+      <option value="3840x2160">4K</option>
+      <option value="640x360">360p</option>
+    </select>
+    <select id="vid-fps" style="background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:0.3rem 0.5rem; color:var(--text); font-size:0.8rem;">
+      <option value="30">30fps</option>
+      <option value="25">25fps</option>
+      <option value="60">60fps</option>
+      <option value="24">24fps</option>
+    </select>
     <span class="status-msg" id="status"></span>
   </div>
 
@@ -648,6 +953,7 @@ function updateUI() {
   document.getElementById('sel-count').textContent = selected.length;
   document.getElementById('sel-duration').textContent = mins + ':' + String(secs).padStart(2, '0');
   document.getElementById('build-btn').disabled = selected.length === 0;
+  document.getElementById('build-video-btn').disabled = selected.length === 0;
 
   // Update order badges
   document.querySelectorAll('.track').forEach(t => {
@@ -714,7 +1020,45 @@ function buildReference() {
   })
   .finally(() => {
     btn.disabled = false;
-    btn.textContent = 'Build Reference';
+    btn.textContent = 'Build Audio Reference';
+  });
+}
+
+function buildVideoReference() {
+  const btn = document.getElementById('build-video-btn');
+  const status = document.getElementById('status');
+  const nums = selected.map(el => parseInt(el.dataset.num));
+  const resolution = document.getElementById('vid-res').value;
+  const fps = parseInt(document.getElementById('vid-fps').value);
+
+  btn.disabled = true;
+  btn.textContent = 'Building...';
+  status.className = 'status-msg building';
+  status.textContent = 'Generating video reference (this may take a moment)...';
+
+  fetch('/reference/build_video', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tracks: nums, resolution: resolution, fps: fps}),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      const mb = (data.size / 1048576).toFixed(1);
+      status.className = 'status-msg success';
+      status.textContent = 'reference_video.mp4 built (' + data.duration + 's, ' + mb + ' MB, ' + data.resolution + ' @ ' + data.fps + 'fps)';
+    } else {
+      status.className = 'status-msg error';
+      status.textContent = 'Error: ' + data.error;
+    }
+  })
+  .catch(e => {
+    status.className = 'status-msg error';
+    status.textContent = 'Error: ' + e.message;
+  })
+  .finally(() => {
+    btn.disabled = false;
+    btn.textContent = 'Build Video Reference';
   });
 }
 
@@ -905,8 +1249,13 @@ PAGE_RESULT = r"""
   <h1>{{ m.filename }}</h1>
   <p class="meta">
     {{ m.created_at[:16] | replace('T', ' ') }}
+    {% if m.mode == 'compare' %}
+      &mdash; <span style="color:var(--accent2);">Compare mode</span>
+      {% if m.ref_name %} &mdash; ref: <strong style="color:var(--text);">{{ m.ref_name }}</strong>{% endif %}
+    {% endif %}
     {% if m.label %} &mdash; {{ m.label }}{% endif %}
     &mdash; {{ '%.1f'|format(m.duration_s) if m.duration_s else '?' }}s analysed
+    {% if m.normalize %} &mdash; <span style="color:var(--green);">Normalized</span>{% endif %}
   </p>
 
   <!-- Metric cards -->
@@ -937,6 +1286,15 @@ PAGE_RESULT = r"""
       <div class="label">PESQ MOS</div>
       <div class="hint">Perceptual quality score. 4.64 = perfect, &gt;4.0 = very good.</div>
     </div>
+    {% if m.polqa_mos is not none %}
+    <div class="card">
+      <div class="value {{ 'good' if m.polqa_mos >= 4.0 else ('warn' if m.polqa_mos >= 3.5 else 'bad') }}">
+        {{ '%.2f'|format(m.polqa_mos) }}
+      </div>
+      <div class="label">POLQA MOS</div>
+      <div class="hint">ITU-T P.863 successor to PESQ. 1&ndash;4.75 scale, &gt;4.0 = very good.</div>
+    </div>
+    {% endif %}
     {% if m.peaq_odg is not none %}
     <div class="card">
       <div class="value">{{ '%.2f'|format(m.peaq_odg) }}</div>
@@ -951,22 +1309,50 @@ PAGE_RESULT = r"""
       <div class="hint">Perceptual similarity. 5 = identical, 1 = bad.</div>
     </div>
     {% endif %}
+    {% if m.vmaf_score is not none %}
+    <div class="card">
+      <div class="value {{ 'good' if m.vmaf_score >= 90 else ('warn' if m.vmaf_score >= 70 else 'bad') }}">
+        {{ '%.1f'|format(m.vmaf_score) }}
+      </div>
+      <div class="label">VMAF</div>
+      <div class="hint">Video quality. 100 = perfect, &gt;90 = excellent.</div>
+    </div>
+    {% endif %}
+    {% if m.psnr_avg is not none %}
+    <div class="card">
+      <div class="value">{{ '%.1f'|format(m.psnr_avg) }}</div>
+      <div class="label">PSNR (dB)</div>
+      <div class="hint">Peak signal-to-noise ratio. Higher = less pixel error.</div>
+    </div>
+    {% endif %}
+    {% if m.ssim_avg is not none %}
+    <div class="card">
+      <div class="value {{ 'good' if m.ssim_avg >= 0.95 else ('warn' if m.ssim_avg >= 0.85 else 'bad') }}">
+        {{ '%.4f'|format(m.ssim_avg) }}
+      </div>
+      <div class="label">SSIM</div>
+      <div class="hint">Structural similarity. 1.0 = identical.</div>
+    </div>
+    {% endif %}
   </div>
 
   <!-- A/B Player -->
   <div class="ab-player">
     <h2>A/B Playback</h2>
     <div class="explain" style="margin-bottom:0.8rem;">
-      Listen to the reference and processed audio side by side. Toggle between A (reference) and B (processed)
-      while playback continues from the same position to hear exactly what the pipeline changed.
+      Listen to the reference and processed audio side by side. Toggle between A (reference), B (processed),
+      and D (difference) while playback continues from the same position.
+      The difference signal is reference minus processed — in a perfect pipeline it would be silence.
     </div>
     <audio id="audio-ref" preload="auto" src="/audio/{{ m.id }}/reference.wav"></audio>
     <audio id="audio-proc" preload="auto" src="/audio/{{ m.id }}/processed.wav"></audio>
+    <audio id="audio-diff" preload="auto" src="/audio/{{ m.id }}/difference.wav"></audio>
     <div class="ab-controls">
       <button class="ab-play-btn" id="ab-play" onclick="abTogglePlay()">&#9654;</button>
       <div class="ab-toggle">
-        <button id="ab-btn-a" class="active" onclick="abSwitch('a')">A &mdash; Reference</button>
+        <button id="ab-btn-a" class="active" onclick="abSwitch('a')">A &mdash; {{ m.ref_name if m.mode == 'compare' and m.ref_name else 'Reference' }}</button>
         <button id="ab-btn-b" onclick="abSwitch('b')">B &mdash; Processed</button>
+        <button id="ab-btn-d" onclick="abSwitch('d')">D &mdash; Difference</button>
       </div>
       <input type="range" class="ab-seek" id="ab-seek" min="0" max="1000" value="0">
       <span class="ab-time" id="ab-time">0:00 / 0:00</span>
@@ -1182,23 +1568,126 @@ PAGE_RESULT = r"""
   </div>
   {% endif %}
 
+  {% if detail and detail.polqa and detail.polqa.mos_lqo is defined %}
+  <div class="data-section">
+    <h2>POLQA (ITU-T P.863)</h2>
+    <div class="explain">
+      The successor to PESQ, designed for super-wideband and fullband audio (up to 14 kHz).
+      POLQA better handles modern codecs (AAC, Opus, HE-AAC) and HD voice.
+      Scores range from 1 to 4.75 &mdash; higher is better.
+      <div class="scale">
+        <span class="g">&ge;4.0 very good</span>
+        <span class="w">3.0&ndash;4.0 fair</span>
+        <span class="r">&lt;3.0 poor</span>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="kv"><span class="k">MOS-LQO</span><span class="v">{{ '%.3f'|format(detail.polqa.mos_lqo) }}</span></div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if detail and detail.video %}
+  <div class="data-section">
+    <h2>Video Quality</h2>
+    <div class="explain">
+      Video quality metrics comparing the processed video frame-by-frame against the reference.
+      <strong>VMAF</strong> is Netflix's perceptual quality model (0-100).
+      <strong>PSNR</strong> measures pixel-level accuracy.
+      <strong>SSIM</strong> measures structural similarity.
+      <div class="scale">
+        <span class="g">VMAF &ge;90 excellent</span>
+        <span class="w">70-90 good</span>
+        <span class="r">&lt;70 noticeable degradation</span>
+      </div>
+    </div>
+    <div class="grid2">
+      {% if detail.video.vmaf_score is not none %}
+      <div class="kv"><span class="k">VMAF (mean)</span><span class="v">{{ '%.2f'|format(detail.video.vmaf_score) }}</span></div>
+      {% endif %}
+      {% if detail.video.vmaf_harmonic_mean is not none %}
+      <div class="kv"><span class="k">VMAF (harmonic mean)</span><span class="v">{{ '%.2f'|format(detail.video.vmaf_harmonic_mean) }}</span></div>
+      {% endif %}
+      {% if detail.video.psnr_avg is not none %}
+      <div class="kv"><span class="k">PSNR (avg)</span><span class="v">{{ '%.2f'|format(detail.video.psnr_avg) }} dB</span></div>
+      {% endif %}
+      {% if detail.video.ssim_avg is not none %}
+      <div class="kv"><span class="k">SSIM (avg)</span><span class="v">{{ '%.4f'|format(detail.video.ssim_avg) }}</span></div>
+      {% endif %}
+    </div>
+    {% if detail.video.info %}
+    <h2 style="margin-top:1rem;">Video Info</h2>
+    <div class="grid2">
+      <div class="kv"><span class="k">Resolution</span><span class="v">{{ detail.video.info.width }}x{{ detail.video.info.height }}</span></div>
+      <div class="kv"><span class="k">Framerate</span><span class="v">{{ '%.2f'|format(detail.video.info.fps) }} fps</span></div>
+      <div class="kv"><span class="k">Codec</span><span class="v">{{ detail.video.info.codec_name }}</span></div>
+      <div class="kv"><span class="k">Duration</span><span class="v">{{ '%.1f'|format(detail.video.info.duration) }}s</span></div>
+    </div>
+    {% endif %}
+    {% if detail.video.alignment %}
+    <h2 style="margin-top:1rem;">Video Alignment</h2>
+    <div class="grid2">
+      <div class="kv"><span class="k">Offset</span><span class="v">{{ detail.video.alignment.offset_frames }} frames ({{ '%.3f'|format(detail.video.alignment.offset_seconds) }}s)</span></div>
+      <div class="kv"><span class="k">Confidence</span><span class="v">{{ '%.0f'|format(detail.video.alignment.confidence) }}x</span></div>
+    </div>
+    {% endif %}
+    {% if detail.video.per_frame %}
+    <div class="plot-card" style="margin-top:1rem;">
+      <h3>Per-Frame VMAF</h3>
+      <div class="explain">
+        VMAF score for each frame over time. Dips indicate moments of visible quality degradation &mdash;
+        typically on scene changes, fast motion, or high-detail frames where the encoder runs out of bitrate.
+      </div>
+      <img class="plot-img" data-title="Per-Frame VMAF"
+           src="/plot/{{ m.id }}/vmaf_per_frame.png" loading="lazy">
+    </div>
+    {% endif %}
+  </div>
+  {% elif detail and detail.video_info %}
+  <div class="data-section">
+    <h2>Video Info</h2>
+    <div class="grid2">
+      <div class="kv"><span class="k">Resolution</span><span class="v">{{ detail.video_info.width }}x{{ detail.video_info.height }}</span></div>
+      <div class="kv"><span class="k">Framerate</span><span class="v">{{ '%.2f'|format(detail.video_info.fps) }} fps</span></div>
+      <div class="kv"><span class="k">Codec</span><span class="v">{{ detail.video_info.codec_name }}</span></div>
+      <div class="kv"><span class="k">Duration</span><span class="v">{{ '%.1f'|format(detail.video_info.duration) }}s</span></div>
+    </div>
+    <p style="font-size:0.8rem; color:var(--muted); margin-top:0.5rem;">
+      No video reference found — video metrics not computed. Build a video reference first.
+    </p>
+  </div>
+  {% endif %}
+
   <div class="data-section">
     <h2>Alignment</h2>
     <div class="explain">
+      {% if m.mode == 'compare' %}
+      Both files were aligned via cross-correlation of their audio content.
+      {% else %}
       Before comparing, the two audio files must be lined up sample-by-sample. AMAF uses a sync chirp
       (a rising tone at the start of the reference) to find the exact offset.
+      {% endif %}
       <strong>Offset</strong> is how many samples into the captured file the reference audio starts.
-      <strong>Confidence</strong> is how clear the match was; values above 100x are reliable.
+      <strong>Confidence</strong> is how clear the match was; higher values are more reliable.
     </div>
     <div class="grid2">
       <div class="kv"><span class="k">Offset</span><span class="v">{{ detail.alignment.offset_samples }} samples</span></div>
       <div class="kv"><span class="k">Confidence</span><span class="v">{{ '%.0f'|format(detail.alignment.confidence) }}x</span></div>
+      {% if detail.normalized %}
+      <div class="kv"><span class="k">Normalized</span><span class="v" style="color:var(--green);">Yes</span></div>
+      <div class="kv"><span class="k">Gain correction</span><span class="v">{{ '%+.2f'|format(detail.gain_db) }} dB</span></div>
+      {% endif %}
     </div>
   </div>
   {% endif %}
 
   <div style="margin-top: 1.5rem;">
     <a class="btn btn-accent2" href="/report/{{ m.id }}">Download PDF Report</a>
+    <form method="post" action="/reprocess/{{ m.id }}" style="display:inline-flex; align-items:center; gap:0.4rem;">
+      <input type="checkbox" name="normalize" value="1" {{ 'checked' if m.normalize else '' }} id="reprocess-norm" style="margin:0;">
+      <label for="reprocess-norm" style="font-size:0.85rem; color:var(--muted); cursor:pointer;">Normalize</label>
+      <button class="btn" style="background:var(--orange);" type="submit">Reprocess</button>
+    </form>
     <a class="btn" href="/">Back to Dashboard</a>
   </div>
 </div>
@@ -1252,21 +1741,29 @@ document.addEventListener('keydown', (e) => {
 // A/B Player
 const audioRef = document.getElementById('audio-ref');
 const audioProc = document.getElementById('audio-proc');
+const audioDiff = document.getElementById('audio-diff');
 const abPlay = document.getElementById('ab-play');
 const abBtnA = document.getElementById('ab-btn-a');
 const abBtnB = document.getElementById('ab-btn-b');
+const abBtnD = document.getElementById('ab-btn-d');
 const abSeek = document.getElementById('ab-seek');
 const abTime = document.getElementById('ab-time');
 const abPlayer = document.querySelector('.ab-player');
-let abCurrent = 'a'; // 'a' = reference, 'b' = processed
+const abAllAudio = [audioRef, audioProc, audioDiff];
+let abCurrent = 'a'; // 'a' = reference, 'b' = processed, 'd' = difference
 let abPlaying = false;
 
 // Hide player if audio files aren't available (older measurements)
 audioRef.addEventListener('error', () => { abPlayer.style.display = 'none'; });
 audioProc.addEventListener('error', () => { abPlayer.style.display = 'none'; });
+// Hide difference button if file missing (older measurements)
+audioDiff.addEventListener('error', () => { abBtnD.style.display = 'none'; });
 
-function abActive() { return abCurrent === 'a' ? audioRef : audioProc; }
-function abInactive() { return abCurrent === 'a' ? audioProc : audioRef; }
+function abActive() {
+  if (abCurrent === 'a') return audioRef;
+  if (abCurrent === 'b') return audioProc;
+  return audioDiff;
+}
 
 function fmtTime(s) {
   if (!isFinite(s)) return '0:00';
@@ -1297,14 +1794,14 @@ function abSwitch(which) {
   if (wasPlaying) abActive().play();
   abBtnA.classList.toggle('active', which === 'a');
   abBtnB.classList.toggle('active', which === 'b');
+  abBtnD.classList.toggle('active', which === 'd');
 }
 
 // Seek bar
 abSeek.addEventListener('input', () => {
   const dur = abActive().duration || 0;
   const t = (abSeek.value / 1000) * dur;
-  audioRef.currentTime = t;
-  audioProc.currentTime = t;
+  abAllAudio.forEach(a => { a.currentTime = t; });
 });
 
 // Update time display and seek bar
@@ -1319,8 +1816,7 @@ function abUpdate() {
 abUpdate();
 
 // When playback ends
-audioRef.addEventListener('ended', () => { abPlaying = false; abPlay.innerHTML = '&#9654;'; });
-audioProc.addEventListener('ended', () => { abPlaying = false; abPlay.innerHTML = '&#9654;'; });
+abAllAudio.forEach(a => a.addEventListener('ended', () => { abPlaying = false; abPlay.innerHTML = '&#9654;'; }));
 
 // Keyboard shortcut: space to play/pause, A/B keys to switch
 document.addEventListener('keydown', (e) => {
@@ -1329,6 +1825,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { e.preventDefault(); abTogglePlay(); }
   if (e.key === 'a' || e.key === 'A') abSwitch('a');
   if (e.key === 'b' || e.key === 'B') abSwitch('b');
+  if (e.key === 'd' || e.key === 'D') abSwitch('d');
 });
 </script>
 </body>

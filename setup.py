@@ -4,7 +4,7 @@ setup(
     name="amaf",
     version="1.0.0",
     description="Audio Multi-Method Assessment Fusion",
-    py_modules=["web", "measure", "report", "generate_reference"],
+    py_modules=["web", "measure", "report", "generate_reference", "video"],
     install_requires=[
         "numpy",
         "scipy",
