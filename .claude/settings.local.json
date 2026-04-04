@@ -28,7 +28,22 @@
       "Bash(git branch:*)",
       "Bash(git commit:*)",
       "Bash(amaf --help)",
-      "Bash(timeout 2 amaf)"
+      "Bash(timeout 2 amaf)",
+      "Bash(wc:*)",
+      "Bash(ffmpeg -filters)",
+      "Bash(ffmpeg -version)",
+      "Bash(brew info:*)",
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//opt/homebrew/Cellar/libvmaf/**)",
+      "Bash(vmaf --help)",
+      "Bash(ls:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(brew options:*)",
+      "Bash(pkgconfig:*)",
+      "Bash(pkg-config:*)",
+      "Bash(git:*)",
+      "Bash(sqlite3:*)",
+      "Bash(amaf)"
     ]
   }
 }
