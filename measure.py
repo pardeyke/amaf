@@ -416,23 +416,39 @@ def run_polqa(ref_path, deg_path, sr=44100):
 
 def run_peaq(ref_path, deg_path):
     """PEAQ via gstpeaq (GStreamer plugin)."""
-    if not shutil.which("gstpeaq"):
+    peaq_bin = shutil.which("peaq") or shutil.which("gstpeaq")
+    if not peaq_bin:
         print("  PEAQ: not available (install gstpeaq)")
         return None
 
     try:
+        # Ensure GStreamer can find the peaq plugin regardless of install location
+        env = os.environ.copy()
+        plugin_dirs = ["/usr/local/lib/gstreamer-1.0"]
+        if env.get("GST_PLUGIN_PATH"):
+            plugin_dirs.append(env["GST_PLUGIN_PATH"])
+        env["GST_PLUGIN_PATH"] = ":".join(plugin_dirs)
+
         result = subprocess.run(
-            ["gstpeaq", "--basic", ref_path, deg_path],
-            capture_output=True, text=True, timeout=120,
+            [peaq_bin, "--basic", ref_path, deg_path],
+            capture_output=True, text=True, timeout=120, env=env,
         )
         # Parse ODG and DI from output
+        # Output format: "Objective Difference Grade: -0.467\nDistortion Index: 1.632\n"
         odg = None
         di = None
         for line in result.stdout.splitlines():
-            if "ODG" in line:
+            if "Difference Grade" in line or "ODG" in line:
                 odg = float(line.split(":")[-1].strip())
-            if "DI" in line:
+            if "Distortion Index" in line or "DI" in line:
                 di = float(line.split(":")[-1].strip())
+        if odg is None:
+            stderr = result.stderr.strip()
+            if stderr:
+                print(f"  PEAQ: plugin error — {stderr.splitlines()[-1]}")
+            return None
+        # Clamp ODG to valid range [-4, 0] (gstpeaq can exceed this)
+        odg = max(-4.0, min(0.0, odg))
         return {"odg": odg, "di": di}
     except Exception as e:
         print(f"  PEAQ: error ({e})")

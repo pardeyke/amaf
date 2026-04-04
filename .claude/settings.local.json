@@ -43,7 +43,14 @@
       "Bash(pkg-config:*)",
       "Bash(git:*)",
       "Bash(sqlite3:*)",
-      "Bash(amaf)"
+      "Bash(amaf)",
+      "Bash(peaq --help)",
+      "Bash(peaq --basic /tmp/test_ref.wav /tmp/test_deg.wav)",
+      "Bash(echo \"exit: $?\")",
+      "Read(//usr/local/lib/gstreamer-1.0/**)",
+      "Read(//opt/homebrew/Cellar/gstreamer/1.28.1/lib/gstreamer-1.0/**)",
+      "Bash(GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0 peaq --basic /tmp/test_ref.wav /tmp/test_deg.wav)",
+      "Bash(GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0 peaq --basic)"
     ]
   }
 }
